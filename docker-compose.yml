@@ -1,66 +1,84 @@
+version: "3.9"
+
 services:
-    nopcommerce_web:
-        build: .
-        container_name: nopcommerce
-        depends_on:
-            - nopcommerce_database
-            - jaeger
-            - prometheus
-        environment:
-            - OTEL_EXPORTER_JAEGER_AGENT_HOST=jaeger
-            - OTEL_EXPORTER_JAEGER_AGENT_PORT=6831
-            - OTEL_EXPORTER_JAEGER_ENDPOINT=http://jaeger:14268/api/traces
-            - OTEL_METRIC_EXPORTER=prometheus
-            - OTEL_METRIC_EXPORTER_PROMETHEUS_HOST=0.0.0.0
-            - OTEL_METRIC_EXPORTER_PROMETHEUS_PORT=9464
-        ports:
-            - "80:80"
-            - "9464:9464"   # Prometheus port
-    nopcommerce_database:
-        image: "mcr.microsoft.com/mssql/server:2019-latest"
-        container_name: nopcommerce_mssql_server
-        environment:
-            SA_PASSWORD: "nopCommerce_db_password"
-            ACCEPT_EULA: "Y"
-            MSSQL_PID: "Express"
+  nopcommerce_web:
+    build: .
+    container_name: nopcommerce
+    depends_on:
+      - nopcommerce_database
+      - jaeger
+      - prometheus
+      - telemetry_service
+    environment:
+      - OTEL_EXPORTER_JAEGER_AGENT_HOST=jaeger
+      - OTEL_EXPORTER_JAEGER_AGENT_PORT=6831
+      - OTEL_EXPORTER_JAEGER_ENDPOINT=http://jaeger:14268/api/traces
+      - OTEL_METRIC_EXPORTER=prometheus
+      - OTEL_METRIC_EXPORTER_PROMETHEUS_HOST=0.0.0.0
+      - OTEL_METRIC_EXPORTER_PROMETHEUS_PORT=9464
+    ports:
+      - "80:80"
+      - "9464:9464"   # Prometheus metrics expostas pela app
+    volumes:
+      - nopcommerce_data:/app_data
 
-    jaeger:
-        image: jaegertracing/all-in-one:latest
-        container_name: jaeger
-        ports:
-            - "5775:5775/udp"
-            - "6831:6831/udp"
-            - "6832:6832/udp"
-            - "5778:5778"
-            - "16686:16686"  # Jaeger UI
-            - "14268:14268"
-            - "14250:14250"
-            - "9411:9411"
-        environment:
-            - COLLECTOR_OTLP_ENABLED=true
+  nopcommerce_database:
+    image: "mcr.microsoft.com/mssql/server:2019-latest"
+    container_name: nopcommerce_mssql_server
+    environment:
+      SA_PASSWORD: "nopCommerce_db_password"
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: "Express"
 
-    prometheus:
-        image: prom/prometheus:latest
-        container_name: prometheus
-        ports:
-            - "9090:9090"
-        volumes:
-            - ./prometheus.yml:/etc/prometheus/prometheus.yml
-        command:
-            - '--config.file=/etc/prometheus/prometheus.yml'
-    
-    grafana:
-        image: grafana/grafana:latest
-        container_name: grafana
-        ports:
-            - "3000:3000"
-        environment:
-            - GF_SECURITY_ADMIN_PASSWORD=admin
-        volumes:
-            - grafana_data:/var/lib/grafana
-            - ./grafana/datasources:/etc/grafana/provisioning/datasources
-            - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+  telemetry_service:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: opentelemetry_collector
+    command: ["--config=/etc/otel-config.yaml"]
+    volumes:
+      - ./otel-config.yaml:/etc/otel-config.yaml
+    ports:
+      - "4317:4317"   # OTLP 
+      - "9465:9464"   
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
+    ports:
+      - "5775:5775/udp"
+      - "6831:6831/udp"
+      - "6832:6832/udp"
+      - "5778:5778"
+      - "16686:16686"  # Jaeger UI
+      - "14268:14268"
+      - "14250:14250"
+      - "9411:9411"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
 
 volumes:
-  nopcommerce_data:  
-  grafana_data:          
+  nopcommerce_data:
+  grafana_data:

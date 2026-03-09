@@ -1,6 +1,7 @@
 ﻿using Autofac.Extensions.DependencyInjection;
 using Nop.Core.Configuration;
 using Nop.Core.Infrastructure;
+using Nop.Core.Telemetry;
 using Nop.Web.Framework.Infrastructure.Extensions;
 
 namespace Nop.Web;
@@ -10,6 +11,7 @@ public partial class Program
     public static async Task Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
+        var telemetry = TelemetryManager.Instance;
 
         builder.Configuration.AddJsonFile(NopConfigurationDefaults.AppSettingsFilePath, true, true);
         if (!string.IsNullOrEmpty(builder.Environment?.EnvironmentName))
@@ -42,6 +44,8 @@ public partial class Program
         builder.Services.ConfigureApplicationServices(builder);
 
         var app = builder.Build();
+
+        app.Lifetime.ApplicationStopping.Register(() => telemetry.Dispose());
 
         //configure the application HTTP request pipeline
         app.ConfigureRequestPipeline();
