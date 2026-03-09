@@ -50,7 +50,10 @@ namespace Nop.Core.Telemetry
                     options.RecordException = true;
                     options.EnableConnectionLevelAttributes = true;
                 })
-                .AddSource("NopCommerce.Custom")
+                .AddSource("NopCommerce.Custom")  // All the sources for the activities
+                .AddSource("NopCommerce.Custom.Orders")
+                .AddSource("NopCommerce.Custom.Basket")
+                .AddSource("NopCommerce.Custom.Payment")
                 .AddOtlpExporter(options =>
                 {
                     options.Endpoint = new Uri(otlpEndpoint);
