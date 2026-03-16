@@ -4,18 +4,18 @@ services:
   nopcommerce_web:
     build: .
     container_name: nopcommerce
+    restart: unless-stopped
     depends_on:
       - nopcommerce_database
       - jaeger
       - prometheus
       - telemetry_service
     environment:
-      - OTEL_EXPORTER_JAEGER_AGENT_HOST=jaeger
-      - OTEL_EXPORTER_JAEGER_AGENT_PORT=6831
-      - OTEL_EXPORTER_JAEGER_ENDPOINT=http://jaeger:14268/api/traces
-      - OTEL_METRIC_EXPORTER=prometheus
-      - OTEL_METRIC_EXPORTER_PROMETHEUS_HOST=0.0.0.0
-      - OTEL_METRIC_EXPORTER_PROMETHEUS_PORT=9464
+      - OTEL_SERVICE_NAME=nopcommerce-service
+      - OTEL_SERVICE_VERSION=5.0.0
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://telemetry_service:4317
+      - OTEL_TRACES_SAMPLER_ARG=1.0  
+
     ports:
       - "80:80"
       - "9464:9464"   # Prometheus metrics expostas pela app
@@ -33,9 +33,9 @@ services:
   telemetry_service:
     image: otel/opentelemetry-collector-contrib:latest
     container_name: opentelemetry_collector
-    command: ["--config=/etc/otel-config.yaml"]
+    command: ["--config=/etc/otel-config.yml"]
     volumes:
-      - ./otel-config.yaml:/etc/otel-config.yaml
+      - ./otel-config.yml:/etc/otel-config.yml
     ports:
       - "4317:4317"   # OTLP 
       - "9465:9464"   
@@ -46,13 +46,7 @@ services:
     image: jaegertracing/all-in-one:latest
     container_name: jaeger
     ports:
-      - "5775:5775/udp"
-      - "6831:6831/udp"
-      - "6832:6832/udp"
-      - "5778:5778"
       - "16686:16686"  # Jaeger UI
-      - "14268:14268"
-      - "14250:14250"
       - "9411:9411"
     environment:
       - COLLECTOR_OTLP_ENABLED=true
