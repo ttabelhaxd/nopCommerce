@@ -56,10 +56,7 @@ namespace Nop.Core.Telemetry
                         options.RecordException = true;
                         options.EnableConnectionLevelAttributes = true;
                     })
-                    .AddSource("Nop.Web.CatalogController")
-                    .AddSource("Nop.Services.Catalog.ProductService")
-                    .AddSource("Nop.Services.Catalog.PriceCalculation")
-                    .AddSource("Nop.Web.ProductModelFactory")
+                    .AddSource("Nop.OrderProcessing") 
                     .AddSource("NopCommerce.Custom")
                     .AddOtlpExporter(options =>
                     {
