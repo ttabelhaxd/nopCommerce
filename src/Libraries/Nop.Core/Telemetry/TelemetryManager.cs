@@ -1,73 +1,121 @@
 using OpenTelemetry;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
-using System;
+using OpenTelemetry.Metrics;
 
 namespace Nop.Core.Telemetry
 {
-    public sealed class TelemetryManager : IDisposable
+    public sealed class TelemetryCoordinator : IDisposable
     {
-        private static readonly Lazy<TelemetryManager> _instance =
-            new Lazy<TelemetryManager>(() => new TelemetryManager());
+        private static readonly Lazy<TelemetryCoordinator> _lazyInstance =
+            new Lazy<TelemetryCoordinator>(() => new TelemetryCoordinator());
 
         private readonly TracerProvider _tracerProvider;
-        private bool _disposed;
+        private readonly MeterProvider _meterProvider;
+        private bool _isDisposed;
 
-        public static TelemetryManager Instance => _instance.Value;
+        public static TelemetryCoordinator Current => _lazyInstance.Value;
 
-        private TelemetryManager()
+        private TelemetryCoordinator()
         {
-            // Config por environment variables (docker-compose)
-            var serviceName = Environment.GetEnvironmentVariable("OTEL_SERVICE_NAME") 
-                              ?? "nopcommerce-service";
-            var serviceVersion = Environment.GetEnvironmentVariable("OTEL_SERVICE_VERSION")
-                                ?? "5.0.0";
-            var otlpEndpoint = Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT")
-                               ?? "http://telemetry_service:4317";
-            var samplingRatioEnv = Environment.GetEnvironmentVariable("OTEL_TRACES_SAMPLER_ARG");
-            var samplingRatio = 1.0;
-            if (!string.IsNullOrWhiteSpace(samplingRatioEnv))
-            {
-                double.TryParse(samplingRatioEnv, out samplingRatio);
-            }
+            Console.WriteLine("[Telemetry] Initializing OpenTelemetry...");
 
-            _tracerProvider = Sdk.CreateTracerProviderBuilder()
-                .SetResourceBuilder(
-                    ResourceBuilder.CreateDefault()
-                        .AddService(
-                            serviceName: serviceName,
-                            serviceVersion: serviceVersion,
-                            serviceInstanceId: Environment.MachineName)
-                )
-                .SetSampler(new TraceIdRatioBasedSampler(samplingRatio))
-                .AddHttpClientInstrumentation(options =>
-                {
-                    options.RecordException = true;
-                })
-                .AddSqlClientInstrumentation(options =>
-                {
-                    options.SetDbStatementForText = false;
-                    options.RecordException = true;
-                    options.EnableConnectionLevelAttributes = true;
-                })
-                .AddSource("NopCommerce.Custom")  // All the sources for the activities
-                .AddSource("NopCommerce.Custom.Orders")
-                .AddSource("NopCommerce.Custom.Basket")
-                .AddSource("NopCommerce.Custom.Payment")
-                .AddOtlpExporter(options =>
-                {
-                    options.Endpoint = new Uri(otlpEndpoint);
-                    options.Protocol = OpenTelemetry.Exporter.OtlpExportProtocol.Grpc;
-                })
-                .Build();
+            try
+            {
+                var serviceName = "nopcommerce-service";
+                var serviceVersion = "5.0.1";
+                var otlpEndpoint = "http://telemetry_service:4317";
+
+                var resource = ResourceBuilder.CreateDefault()
+                    .AddService(
+                        serviceName: serviceName,
+                        serviceVersion: serviceVersion,
+                        serviceInstanceId: Environment.MachineName)
+                    .AddAttributes(new[]
+                    {
+                        new KeyValuePair<string, object>("deployment.environment", "production"),
+                        new KeyValuePair<string, object>("host.name", Environment.MachineName)
+                    });
+
+                Console.WriteLine("[Telemetry] Building TracerProvider...");
+
+                _tracerProvider = Sdk.CreateTracerProviderBuilder()
+                    .SetResourceBuilder(resource)
+                    .AddAspNetCoreInstrumentation(options =>
+                    {
+                        options.RecordException = true;
+                        options.Filter = ctx => !ctx.Request.Path.StartsWithSegments("/health");
+                    })
+                    .AddHttpClientInstrumentation(options =>
+                    {
+                        options.RecordException = true;
+                    })
+                    .AddSqlClientInstrumentation(options =>
+                    {
+                        options.SetDbStatementForText = false;
+                        options.RecordException = true;
+                        options.EnableConnectionLevelAttributes = true;
+                    })
+                    .AddSource("Nop.Web.CatalogController")
+                    .AddSource("Nop.Services.Catalog.ProductService")
+                    .AddSource("Nop.Services.Catalog.PriceCalculation")
+                    .AddSource("Nop.Web.ProductModelFactory")
+                    .AddSource("NopCommerce.Custom")
+                    .AddOtlpExporter(options =>
+                    {
+                        options.Endpoint = new Uri(otlpEndpoint);
+                        options.Protocol = OpenTelemetry.Exporter.OtlpExportProtocol.Grpc;
+                    })
+                    .Build();
+
+                Console.WriteLine("[Telemetry] TracerProvider ready.");
+
+                Console.WriteLine("[Telemetry] Building MeterProvider...");
+
+                _meterProvider = Sdk.CreateMeterProviderBuilder()
+                    .SetResourceBuilder(resource)
+                    .AddHttpClientInstrumentation()
+                    .AddMeter("NopCommerce.Custom")
+                    .AddOtlpExporter(options =>
+                    {
+                        options.Endpoint = new Uri(otlpEndpoint);
+                        options.Protocol = OpenTelemetry.Exporter.OtlpExportProtocol.Grpc;
+                    })
+                    .Build();
+
+                Console.WriteLine("[Telemetry] MeterProvider ready.");
+                Console.WriteLine("[Telemetry] OpenTelemetry initialization completed.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[Telemetry] Failed to initialize OpenTelemetry.");
+                Console.WriteLine($"[Telemetry] Exception: {ex.Message}");
+                Console.WriteLine($"[Telemetry] StackTrace: {ex.StackTrace}");
+                throw;
+            }
         }
 
         public void Dispose()
         {
-            if (!_disposed)
+            if (_isDisposed)
+                return;
+
+            Console.WriteLine("[Telemetry] Disposing TelemetryCoordinator...");
+
+            try
             {
                 _tracerProvider?.Dispose();
-                _disposed = true;
+                _meterProvider?.ForceFlush();
+                _meterProvider?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Telemetry] Error during dispose: {ex.Message}");
+            }
+            finally
+            {
+                _isDisposed = true;
+                Console.WriteLine("[Telemetry] TelemetryCoordinator disposed.");
             }
         }
     }
