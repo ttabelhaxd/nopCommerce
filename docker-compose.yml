@@ -63,4 +63,5 @@ services:
 
 volumes:
   nopcommerce_data:
+  nopcommerce_db_data:
   grafana_data:
