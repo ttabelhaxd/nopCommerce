@@ -7,18 +7,9 @@ services:
     restart: unless-stopped
     depends_on:
       - nopcommerce_database
-      - jaeger
-      - prometheus
       - telemetry_service
-    environment:
-      - OTEL_SERVICE_NAME=nopcommerce-service
-      - OTEL_SERVICE_VERSION=5.0.0
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://telemetry_service:4317
-      - OTEL_TRACES_SAMPLER_ARG=1.0  
-
     ports:
       - "80:80"
-      - "9464:9464"   # Prometheus metrics expostas pela app
     volumes:
       - nopcommerce_data:/app_data
 
@@ -29,6 +20,8 @@ services:
       SA_PASSWORD: "nopCommerce_db_password"
       ACCEPT_EULA: "Y"
       MSSQL_PID: "Express"
+    volumes:
+      - nopcommerce_db_data:/var/opt/mssql
 
   telemetry_service:
     image: otel/opentelemetry-collector-contrib:latest
@@ -37,8 +30,9 @@ services:
     volumes:
       - ./otel-config.yml:/etc/otel-config.yml
     ports:
-      - "4317:4317"   # OTLP 
-      - "9465:9464"   
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "9465:9464"   # Prometheus metrics
     depends_on:
       - jaeger
 
@@ -47,9 +41,7 @@ services:
     container_name: jaeger
     ports:
       - "16686:16686"  # Jaeger UI
-      - "9411:9411"
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
+      - "14250:14250"  # Jaeger gRPC
 
   prometheus:
     image: prom/prometheus:latest
