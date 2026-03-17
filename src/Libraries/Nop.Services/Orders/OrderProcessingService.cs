@@ -486,50 +486,84 @@ public partial class OrderProcessingService : IOrderProcessingService
     /// <param name="currentCurrency">The working currency</param>
     /// <returns>A task that represents the asynchronous operation</returns>
     /// <exception cref="NopException">Validation problems</exception>
-    protected virtual async Task PrepareAndValidateShoppingCartAndCheckoutAttributesAsync(PlaceOrderContainer details, ProcessPaymentRequest processPaymentRequest, Currency currentCurrency)
+    protected virtual async Task PrepareAndValidateShoppingCartAndCheckoutAttributesAsync(
+        PlaceOrderContainer details,
+        ProcessPaymentRequest processPaymentRequest,
+        Currency currentCurrency)
     {
-        //checkout attributes
-        details.CheckoutAttributesXml = await _genericAttributeService.GetAttributeAsync<string>(details.Customer, NopCustomerDefaults.CheckoutAttributes, processPaymentRequest.StoreId);
-        details.CheckoutAttributeDescription = await _checkoutAttributeFormatter.FormatAttributesAsync(details.CheckoutAttributesXml, details.Customer);
+        var stopwatch = Stopwatch.StartNew();
+        // SPAN
+        using var activity = OrderProcessing.StartActivity("OrderProcessing.Basket", ActivityKind.Internal);
 
-        //load shopping cart
-        details.Cart = await _shoppingCartService.GetShoppingCartAsync(details.Customer, ShoppingCartType.ShoppingCart, processPaymentRequest.StoreId);
-
-        if (!details.Cart.Any())
-            throw new NopException("Cart is empty");
-
-        //validate the entire shopping cart
-        var warnings = await _shoppingCartService.GetShoppingCartWarningsAsync(details.Cart, details.CheckoutAttributesXml, true);
-        if (warnings.Any())
-            throw new NopException(warnings.Aggregate(string.Empty, (current, next) => $"{current}{next};"));
-
-        //validate individual cart items
-        foreach (var sci in details.Cart)
+        try
         {
-            var product = await _productService.GetProductByIdAsync(sci.ProductId);
+            activity?.SetTag("order.flow_stage", "basket_validation");
+            activity?.SetTag("store.id", processPaymentRequest.StoreId);
 
-            var sciWarnings = await _shoppingCartService.GetShoppingCartItemWarningsAsync(details.Customer,
-                sci.ShoppingCartType, product, processPaymentRequest.StoreId, sci.AttributesXml,
-                sci.CustomerEnteredPrice, sci.RentalStartDateUtc, sci.RentalEndDateUtc, sci.Quantity, false, sci.Id);
-            if (sciWarnings.Any())
-                throw new NopException(sciWarnings.Aggregate(string.Empty, (current, next) => $"{current}{next};"));
+            details.CheckoutAttributesXml = await _genericAttributeService.GetAttributeAsync<string>(details.Customer,
+                NopCustomerDefaults.CheckoutAttributes, processPaymentRequest.StoreId);
+            details.CheckoutAttributeDescription = await _checkoutAttributeFormatter
+                .FormatAttributesAsync(details.CheckoutAttributesXml, details.Customer);
+
+            details.Cart = await _shoppingCartService.GetShoppingCartAsync(details.Customer,
+                ShoppingCartType.ShoppingCart, processPaymentRequest.StoreId);
+
+            activity?.SetTag("basket.items_count", details.Cart.Count);
+
+            if (!details.Cart.Any())
+                throw new NopException("Cart is empty");
+
+            var warnings = await _shoppingCartService.GetShoppingCartWarningsAsync(
+                details.Cart, details.CheckoutAttributesXml, true);
+            if (warnings.Any())
+                throw new NopException(warnings.Aggregate(string.Empty, (current, next) => $"{current}{next};"));
+
+            foreach (var sci in details.Cart)
+            {
+                var product = await _productService.GetProductByIdAsync(sci.ProductId);
+
+                var sciWarnings = await _shoppingCartService.GetShoppingCartItemWarningsAsync(details.Customer,
+                    sci.ShoppingCartType, product, processPaymentRequest.StoreId, sci.AttributesXml,
+                    sci.CustomerEnteredPrice, sci.RentalStartDateUtc, sci.RentalEndDateUtc, sci.Quantity, false, sci.Id);
+                if (sciWarnings.Any())
+                    throw new NopException(sciWarnings.Aggregate(string.Empty, (current, next) => $"{current}{next};"));
+            }
+
+            if (!await ValidateMinOrderSubtotalAmountAsync(details.Cart))
+            {
+                var minOrderSubtotalAmount = await _currencyService
+                    .ConvertFromPrimaryStoreCurrencyAsync(_orderSettings.MinOrderSubtotalAmount, currentCurrency);
+                throw new NopException(string.Format(
+                    await _localizationService.GetResourceAsync("Checkout.MinOrderSubtotalAmount"),
+                    await _priceFormatter.FormatPriceAsync(minOrderSubtotalAmount, true, false)));
+            }
+
+            if (!await ValidateMinOrderTotalAmountAsync(details.Cart))
+            {
+                var minOrderTotalAmount = await _currencyService
+                    .ConvertFromPrimaryStoreCurrencyAsync(_orderSettings.MinOrderTotalAmount, currentCurrency);
+                throw new NopException(string.Format(
+                    await _localizationService.GetResourceAsync("Checkout.MinOrderTotalAmount"),
+                    await _priceFormatter.FormatPriceAsync(minOrderTotalAmount, true, false)));
+            }
         }
-
-        //min totals validation
-        if (!await ValidateMinOrderSubtotalAmountAsync(details.Cart))
+        catch (Exception ex)
         {
-            var minOrderSubtotalAmount = await _currencyService.ConvertFromPrimaryStoreCurrencyAsync(_orderSettings.MinOrderSubtotalAmount, currentCurrency);
-            throw new NopException(string.Format(await _localizationService.GetResourceAsync("Checkout.MinOrderSubtotalAmount"),
-                await _priceFormatter.FormatPriceAsync(minOrderSubtotalAmount, true, false)));
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag("error.type", ex.GetType().Name);
+            activity?.SetTag("error.message", ex.Message);
+            activity?.SetTag("error.flow_stage", "basket_validation");
+
+            throw;
         }
-
-        if (!await ValidateMinOrderTotalAmountAsync(details.Cart))
+        finally
         {
-            var minOrderTotalAmount = await _currencyService.ConvertFromPrimaryStoreCurrencyAsync(_orderSettings.MinOrderTotalAmount, currentCurrency);
-            throw new NopException(string.Format(await _localizationService.GetResourceAsync("Checkout.MinOrderTotalAmount"),
-                await _priceFormatter.FormatPriceAsync(minOrderTotalAmount, true, false)));
+            stopwatch.Stop();
+            BasketValidationDuration.Record((long)stopwatch.ElapsedMilliseconds,
+                new KeyValuePair<string, object?>("items_count", details.Cart?.Count ?? 0));
         }
     }
+
 
     /// <summary>
     /// Prepare and validate billing address
@@ -539,6 +573,8 @@ public partial class OrderProcessingService : IOrderProcessingService
     /// <exception cref="NopException">Validation problems</exception>
     protected virtual async Task PrepareAndValidateBillingAddressAsync(PlaceOrderContainer details)
     {
+
+        // SPAN
         using var activity = OrderProcessing.StartActivity("OrderProcessing.Billing", ActivityKind.Internal);
 
         try
@@ -586,6 +622,7 @@ public partial class OrderProcessingService : IOrderProcessingService
         ProcessPaymentRequest processPaymentRequest,
         Currency currentCurrency)
     {
+        // SPAN
         using var activity = OrderProcessing.StartActivity("OrderProcessing.Customer", ActivityKind.Internal);
 
         try
@@ -1315,6 +1352,7 @@ public partial class OrderProcessingService : IOrderProcessingService
     /// <returns>A task that represents the asynchronous operation</returns>
     protected virtual async Task MoveShoppingCartItemsToOrderItemsAsync(PlaceOrderContainer details, Order order)
     {
+        // SPAN
         using var activity = OrderProcessing.StartActivity("OrderProcessing.Inventory", ActivityKind.Internal);
 
         try
@@ -1463,6 +1501,7 @@ public partial class OrderProcessingService : IOrderProcessingService
         PlaceOrderContainer details)
     {
         var stopwatch = Stopwatch.StartNew();
+        // SPAN
         using var activity = OrderProcessing.StartActivity("OrderProcessing.Payment", ActivityKind.Internal);
 
         try
@@ -1687,6 +1726,7 @@ public partial class OrderProcessingService : IOrderProcessingService
             throw new Exception("Order GUID is not generated");
 
         var stopwatch = Stopwatch.StartNew();
+        // SPAN
         using var activity = OrderProcessing.StartActivity("OrderProcessing.PlaceOrder", ActivityKind.Internal);
 
         try

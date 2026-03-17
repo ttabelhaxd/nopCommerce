@@ -11,7 +11,6 @@ public partial class Program
     public static async Task Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
-        var telemetry = TelemetryCoordinator.Current;
 
         builder.Configuration.AddJsonFile(NopConfigurationDefaults.AppSettingsFilePath, true, true);
         if (!string.IsNullOrEmpty(builder.Environment?.EnvironmentName))
@@ -42,6 +41,8 @@ public partial class Program
 
         //add services to the application and configure service provider
         builder.Services.ConfigureApplicationServices(builder);
+
+        var telemetry = TelemetryCoordinator.Current;
 
         var app = builder.Build();
 
