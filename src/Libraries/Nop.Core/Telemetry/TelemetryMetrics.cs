@@ -6,27 +6,22 @@ namespace Nop.Core.Telemetry
     {
         private static readonly Meter _meter = new Meter("NopCommerce.Custom", "1.0.0");
 
-        // Métricas de negócio
-        public static readonly Counter<long> OrdersPlaced =
-            _meter.CreateCounter<long>("orders_placed_total", description: "Total number of orders placed");
+        // Counters
+        public static readonly Counter<long> OrdersPlaced = _meter.CreateCounter<long>("orders_placed_total",
+            description: "Total number of orders placed");
+        public static readonly Counter<long> OrderFailures = _meter.CreateCounter<long>("order_failures_total",
+            description: "Number of failed orders by stage");
+        public static readonly Counter<long> PaymentFailures = _meter.CreateCounter<long>("payment_failures_total",
+            description: "Number of failed payments");
 
-        public static readonly Counter<long> PaymentFailures =
-            _meter.CreateCounter<long>("payment_failures_total", description: "Number of failed payment attempts");
-
-        public static readonly Counter<long> OrderFailures =
-            _meter.CreateCounter<long>("order_failures_total", description: "Number of failed orders at any stage");
-
-        // Latências em ms (para histogramas/gráficos)
-        public static readonly Histogram<long> BasketValidationDuration =
-            _meter.CreateHistogram<long>("basket_validation_duration_ms", "ms",
-                description: "Time taken to validate basket");
-
-        public static readonly Histogram<long> PaymentProcessingDuration =
-            _meter.CreateHistogram<long>("payment_processing_duration_ms", "ms",
-                description: "Time taken to process payment");
-
-        public static readonly Histogram<long> OrderEndToEndDuration =
-            _meter.CreateHistogram<long>("order_end_to_end_duration_ms", "ms",
-                description: "End-to-end time from order start to completion");
+        // Histograms (latência em ms)
+        public static readonly Histogram<long> CheckoutDuration = _meter.CreateHistogram<long>("checkout_duration_ms", "ms",
+            description: "End-to-end checkout duration");
+        public static readonly Histogram<long> PaymentProcessingDuration = _meter.CreateHistogram<long>("payment_processing_duration_ms", "ms",
+            description: "Payment processing duration");
+        public static readonly Histogram<long> OrderEndToEndDuration = _meter.CreateHistogram<long>("order_end_to_end_duration_ms", "ms",
+            description: "Order processing end-to-end duration");
+        public static readonly Histogram<long> BasketValidationDuration = _meter.CreateHistogram<long>("basket_validation_duration_ms", "ms",
+            description: "Basket validation duration");
     }
 }

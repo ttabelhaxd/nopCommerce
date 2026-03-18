@@ -56,7 +56,9 @@ namespace Nop.Core.Telemetry
                         options.RecordException = true;
                         options.EnableConnectionLevelAttributes = true;
                     })
-                    .AddSource("Nop.OrderProcessing") 
+                    .AddSource("Nop.OrderProcessing")
+                    .AddSource("Nop.Checkout")
+                    .AddSource("Nop.Payment")
                     .AddSource("NopCommerce.Custom")
                     .AddOtlpExporter(options =>
                     {

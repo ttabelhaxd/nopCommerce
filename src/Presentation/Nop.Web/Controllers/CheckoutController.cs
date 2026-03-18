@@ -27,6 +27,11 @@ using Nop.Web.Models.Checkout;
 using Nop.Web.Models.Common;
 using ILogger = Nop.Services.Logging.ILogger;
 
+using System.Diagnostics;
+using Nop.Core.Telemetry;
+using static Nop.Core.Telemetry.NopActivitySources;
+using static Nop.Core.Telemetry.TelemetryMetrics;
+
 namespace Nop.Web.Controllers;
 
 [AutoValidateAntiforgeryToken]
@@ -1242,94 +1247,111 @@ public partial class CheckoutController : BasePublicController
         return View(model);
     }
 
-    [ValidateCaptcha]
     [HttpPost, ActionName("Confirm")]
+    [ValidateCaptcha]
     public virtual async Task<IActionResult> ConfirmOrder(bool captchaValid)
     {
-        //validation
-        if (_orderSettings.CheckoutDisabled)
-            return RedirectToRoute(NopRouteNames.General.CART);
-
-        var customer = await _workContext.GetCurrentCustomerAsync();
-        var store = await _storeContext.GetCurrentStoreAsync();
-        var cart = await _shoppingCartService.GetShoppingCartAsync(customer, ShoppingCartType.ShoppingCart, store.Id);
-
-        if (!cart.Any())
-            return RedirectToRoute(NopRouteNames.General.CART);
-
-        if (_orderSettings.OnePageCheckoutEnabled)
-            return RedirectToRoute(NopRouteNames.Standard.CHECKOUT_ONE_PAGE);
-
-        if (await _customerService.IsGuestAsync(customer) && !_orderSettings.AnonymousCheckoutAllowed)
-            return Challenge();
-
-        //model
-        var model = await _checkoutModelFactory.PrepareConfirmOrderModelAsync(cart);
-
-        var isCaptchaSettingEnabled = await _customerService.IsGuestAsync(customer) &&
-                                      _captchaSettings.Enabled && _captchaSettings.ShowOnCheckoutPageForGuests;
-
-        //captcha validation for guest customers
-        if (isCaptchaSettingEnabled && !captchaValid)
-        {
-            model.Warnings.Add(await _localizationService.GetResourceAsync("Common.WrongCaptchaMessage"));
-            return View(model);
-        }
-
+        var stopwatch = Stopwatch.StartNew();
+        // SPAN 
+        using var activity = Checkout.StartActivity("ConfirmOrder", ActivityKind.Server);
         try
         {
-            //prevent 2 orders being placed within an X seconds time frame
-            if (!await IsMinimumOrderPlacementIntervalValidAsync(customer))
-                throw new Exception(await _localizationService.GetResourceAsync("Checkout.MinOrderPlacementInterval"));
+            activity?.SetTag("order.flowstage", "checkout.confirm");
+            activity?.SetTag("customer.id", (await _workContext.GetCurrentCustomerAsync()).Id);
 
-            //place order
-            var processPaymentRequest = await _orderProcessingService.GetProcessPaymentRequestAsync();
-            if (processPaymentRequest == null)
+            if (_orderSettings.CheckoutDisabled)
+                return RedirectToRoute("ShoppingCart");
+
+            var customer = await _workContext.GetCurrentCustomerAsync();
+            var store = await _storeContext.GetCurrentStoreAsync();
+            var cart = await _shoppingCartService.GetShoppingCartAsync(customer, ShoppingCartType.ShoppingCart, store.Id);
+            if (!cart.Any())
+                return RedirectToRoute("ShoppingCart");
+
+            if (_orderSettings.OnePageCheckoutEnabled)
+                return RedirectToRoute("Checkout.OnePage");
+
+            if (await _customerService.IsGuestAsync(customer) && !_orderSettings.AnonymousCheckoutAllowed)
+                return Challenge();
+
+            var model = await _checkoutModelFactory.PrepareConfirmOrderModelAsync(cart);
+            var isCaptchaSettingEnabled = (await _customerService.IsGuestAsync(customer) && _captchaSettings.Enabled && _captchaSettings.ShowOnCheckoutPageForGuests) || (!_captchaSettings.Enabled && !_captchaSettings.ShowOnCheckoutPageForGuests);
+            // captcha validation for guest customers
+            if (isCaptchaSettingEnabled && !captchaValid)
             {
-                //Check whether payment workflow is required
-                if (await _orderProcessingService.IsPaymentWorkflowRequiredAsync(cart))
-                    return RedirectToRoute(NopRouteNames.Standard.CHECKOUT_PAYMENT_INFO);
-
-                processPaymentRequest = new ProcessPaymentRequest();
+                model.Warnings.Add(await _localizationService.GetResourceAsync("Common.WrongCaptchaMessage"));
+                return View(model);
             }
 
-            processPaymentRequest.StoreId = store.Id;
-            processPaymentRequest.CustomerId = customer.Id;
-            processPaymentRequest.PaymentMethodSystemName = await _genericAttributeService.GetAttributeAsync<string>(customer,
-                NopCustomerDefaults.SelectedPaymentMethodAttribute, store.Id);
-            await _orderProcessingService.SetProcessPaymentRequestAsync(processPaymentRequest);
-            var placeOrderResult = await _orderProcessingService.PlaceOrderAsync(processPaymentRequest);
-            if (placeOrderResult.Success)
+            try
             {
-                await _orderProcessingService.SetProcessPaymentRequestAsync(null);
+                // prevent 2 orders being placed within an X seconds time frame
+                if (!await IsMinimumOrderPlacementIntervalValidAsync(customer))
+                    throw new Exception(await _localizationService.GetResourceAsync("Checkout.MinOrderPlacementInterval"));
 
-                var postProcessPaymentRequest = new PostProcessPaymentRequest
+                // place order
+                var processPaymentRequest = await _orderProcessingService.GetProcessPaymentRequestAsync();
+                if (processPaymentRequest == null)
                 {
-                    Order = placeOrderResult.PlacedOrder
-                };
-                await _paymentService.PostProcessPaymentAsync(postProcessPaymentRequest);
-
-                if (_webHelper.IsRequestBeingRedirected || _webHelper.IsPostBeingDone)
-                {
-                    //redirection or POST has been done in PostProcessPayment
-                    return Empty;
+                    // Check whether payment workflow is required
+                    if (await _orderProcessingService.IsPaymentWorkflowRequiredAsync(cart))
+                        return RedirectToRoute("CheckoutPaymentInfo");
+                    processPaymentRequest = new ProcessPaymentRequest();
+                    processPaymentRequest.StoreId = store.Id;
+                    processPaymentRequest.CustomerId = customer.Id;
+                    processPaymentRequest.PaymentMethodSystemName = await _genericAttributeService.GetAttributeAsync<string>(customer,
+                        NopCustomerDefaults.SelectedPaymentMethodAttribute, store.Id);
+                    await _orderProcessingService.SetProcessPaymentRequestAsync(processPaymentRequest);
                 }
 
-                return RedirectToRoute(NopRouteNames.Standard.CHECKOUT_COMPLETED, new { orderId = placeOrderResult.PlacedOrder.Id });
+                var placeOrderResult = await _orderProcessingService.PlaceOrderAsync(processPaymentRequest);
+                if (placeOrderResult.Success)
+                {
+                    await _orderProcessingService.SetProcessPaymentRequestAsync(null);
+                    var postProcessPaymentRequest = new PostProcessPaymentRequest()
+                    {
+                        Order = placeOrderResult.PlacedOrder
+                    };
+                    await _paymentService.PostProcessPaymentAsync(postProcessPaymentRequest);
+
+                    if (_webHelper.IsRequestBeingRedirected || _webHelper.IsPostBeingDone)
+                    {
+                        //redirection or POST has been done in PostProcessPayment
+                        return new EmptyResult();
+                    }
+                    else
+                    {
+                        return RedirectToRoute("CheckoutCompleted", new { orderId = placeOrderResult.PlacedOrder.Id });
+                    }
+                }
+                else
+                    foreach (var error in placeOrderResult.Errors)
+                        model.Warnings.Add(error);
             }
-
-            foreach (var error in placeOrderResult.Errors)
-                model.Warnings.Add(error);
+            catch (Exception exc)
+            {
+                await _logger.WarningAsync(exc.Message, exc);
+                model.Warnings.Add(exc.Message);
+            }
+            // If we got this far, something failed, redisplay form
+            return View(model);
         }
-        catch (Exception exc)
+        catch (Exception ex)
         {
-            await _logger.WarningAsync(exc.Message, exc);
-            model.Warnings.Add(exc.Message);
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag("error.type", ex.GetType().Name);
+            activity?.SetTag("error.message", ex.Message);
+            CheckoutDuration.Record((long)stopwatch.ElapsedMilliseconds, new[] { new KeyValuePair<string, object?>("stage", "confirm.failed") });
+            throw;
         }
-
-        //If we got this far, something failed, redisplay form
-        return View(model);
+        finally
+        {
+            stopwatch.Stop();
+            CheckoutDuration.Record((long)stopwatch.ElapsedMilliseconds);
+            OrdersPlaced.Add(1); 
+        }
     }
+
 
     #endregion
 

@@ -4,6 +4,12 @@ using Nop.Core.Domain.Payments;
 using Nop.Services.Catalog;
 using Nop.Services.Customers;
 
+using System.Diagnostics;
+using Nop.Core.Telemetry;
+using static Nop.Core.Telemetry.NopActivitySources;
+using static Nop.Core.Telemetry.TelemetryMetrics;
+
+
 namespace Nop.Services.Payments;
 
 /// <summary>
@@ -50,29 +56,64 @@ public partial class PaymentService : IPaymentService
     /// </returns>
     public virtual async Task<ProcessPaymentResult> ProcessPaymentAsync(ProcessPaymentRequest processPaymentRequest)
     {
-        if (processPaymentRequest.OrderTotal == decimal.Zero)
+        var stopwatch = Stopwatch.StartNew();
+        // SPAN
+        using var activity = Payment.StartActivity("ProcessPayment", ActivityKind.Client);
+        try
         {
-            var result = new ProcessPaymentResult
+            activity?.SetTag("payment.method", processPaymentRequest.PaymentMethodSystemName);
+            activity?.SetTag("payment.total", processPaymentRequest.OrderTotal);
+            activity?.SetTag("customer.id", processPaymentRequest.CustomerId);
+            activity?.SetTag("store.id", processPaymentRequest.StoreId);
+
+            if (processPaymentRequest.OrderTotal == decimal.Zero)
             {
-                NewPaymentStatus = PaymentStatus.Paid
-            };
+                var paymentResult = new ProcessPaymentResult { NewPaymentStatus = PaymentStatus.Paid };
+                return paymentResult;
+            }
+
+            // We should strip out any white space or dash in the CC number entered.
+            if (!string.IsNullOrWhiteSpace(processPaymentRequest.CreditCardNumber))
+            {
+                processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace(" ", string.Empty);
+                processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace("-", string.Empty);
+            }
+
+            var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
+            var paymentMethod = await _paymentPluginManager
+                .LoadPluginBySystemNameAsync(processPaymentRequest.PaymentMethodSystemName, customer, processPaymentRequest.StoreId)
+                ?? throw new NopException("Payment method couldn't be loaded");
+
+            var result = await paymentMethod.ProcessPaymentAsync(processPaymentRequest);
+
+            activity?.SetTag("payment.status", result.NewPaymentStatus.ToString());
+
+            if (!result.Success)
+            {
+                PaymentFailures.Add(1, new KeyValuePair<string, object?>("payment.method", processPaymentRequest.PaymentMethodSystemName),
+                    new KeyValuePair<string, object?>("status", result.NewPaymentStatus.ToString() ?? "failed"));
+            }
+
             return result;
         }
-
-        //We should strip out any white space or dash in the CC number entered.
-        if (!string.IsNullOrWhiteSpace(processPaymentRequest.CreditCardNumber))
+        catch (Exception ex)
         {
-            processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace(" ", string.Empty);
-            processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace("-", string.Empty);
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag("error.type", ex.GetType().Name);
+            activity?.SetTag("error.message", ex.Message);
+            activity?.SetTag("error.flowstage", "payment");
+            PaymentFailures.Add(1, new KeyValuePair<string, object?>("payment.method", processPaymentRequest.PaymentMethodSystemName),
+                new KeyValuePair<string, object?>("error", ex.Message));
+            throw;
         }
-
-        var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
-        var paymentMethod = await _paymentPluginManager
-                                .LoadPluginBySystemNameAsync(processPaymentRequest.PaymentMethodSystemName, customer, processPaymentRequest.StoreId)
-                            ?? throw new NopException("Payment method couldn't be loaded");
-
-        return await paymentMethod.ProcessPaymentAsync(processPaymentRequest);
+        finally
+        {
+            stopwatch.Stop();
+            PaymentProcessingDuration.Record((long)stopwatch.ElapsedMilliseconds,
+                new[] { new KeyValuePair<string, object?>("payment.method", processPaymentRequest.PaymentMethodSystemName) });
+        }
     }
+
 
     /// <summary>
     /// Post process payment (used by payment gateways that require redirecting to a third-party URL)
