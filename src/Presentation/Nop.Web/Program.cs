@@ -4,6 +4,9 @@ using Nop.Core.Infrastructure;
 using Nop.Core.Telemetry;
 using Nop.Web.Framework.Infrastructure.Extensions;
 
+using OpenTelemetry.Logs;
+using OpenTelemetry.Resources;
+
 namespace Nop.Web;
 
 public partial class Program
@@ -19,6 +22,23 @@ public partial class Program
             builder.Configuration.AddJsonFile(path, true, true);
         }
         builder.Configuration.AddEnvironmentVariables();
+
+        // Logging configuration
+        builder.Logging.ClearProviders();
+        builder.Logging.AddConsole();
+
+        builder.Logging.AddOpenTelemetry(options =>
+        {
+            options.SetResourceBuilder(ResourceBuilder.CreateDefault().AddService("nopcommerce-service"));
+            options.AddOtlpExporter(otlpOptions =>
+            {
+                otlpOptions.Endpoint = new Uri("http://telemetry_service:4318/v1/logs");
+                otlpOptions.Protocol = OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf;
+            });
+            options.AddConsoleExporter();
+            options.IncludeFormattedMessage = true;
+            options.IncludeScopes = true;
+        });
 
         //load application settings
         builder.Services.ConfigureApplicationSettings(builder);
