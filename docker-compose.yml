@@ -33,6 +33,7 @@ services:
       - "9464:9464"   # Prometheus metrics
     depends_on:
       - jaeger
+      - loki
 
   jaeger:
     image: jaegertracing/all-in-one:latest
@@ -48,6 +49,8 @@ services:
       - "9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - telemetry_service
 
   grafana:
     image: grafana/grafana:latest
@@ -58,8 +61,22 @@ services:
       - grafana_data:/var/lib/grafana
       - ./grafana/datasources:/etc/grafana/provisioning/datasources
       - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+    depends_on:
+      - prometheus
+      - jaeger
+      - loki
+
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki_data:/loki
 
 volumes:
   nopcommerce_data:
   nopcommerce_db_data:
   grafana_data:
+  loki_data:
