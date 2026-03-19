@@ -1253,7 +1253,7 @@ public partial class CheckoutController : BasePublicController
     {
         var stopwatch = Stopwatch.StartNew();
         // SPAN 
-        using var activity = Checkout.StartActivity("ConfirmOrder", ActivityKind.Server);
+        using var activity = Checkout.StartActivity("Checkout.ConfirmOrder", ActivityKind.Server);
         try
         {
             activity?.SetTag("order.flowstage", "checkout.confirm");

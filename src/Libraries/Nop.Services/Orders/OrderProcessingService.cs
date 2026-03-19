@@ -1728,7 +1728,6 @@ public partial class OrderProcessingService : IOrderProcessingService
         var stopwatch = Stopwatch.StartNew();
         // SPAN
         using var activity = OrderProcessing.StartActivity("OrderProcessing.PlaceOrder", ActivityKind.Internal);
-
         try
         {
             activity?.SetTag("order.flow_stage", "order_placement");

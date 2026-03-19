@@ -58,7 +58,7 @@ public partial class PaymentService : IPaymentService
     {
         var stopwatch = Stopwatch.StartNew();
         // SPAN
-        using var activity = Payment.StartActivity("ProcessPayment", ActivityKind.Client);
+        using var activity = Payment.StartActivity("Payment.ProcessPayment", ActivityKind.Client);
         try
         {
             activity?.SetTag("payment.method", processPaymentRequest.PaymentMethodSystemName);
