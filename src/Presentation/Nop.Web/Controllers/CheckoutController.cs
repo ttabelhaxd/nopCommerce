@@ -28,9 +28,7 @@ using Nop.Web.Models.Common;
 using ILogger = Nop.Services.Logging.ILogger;
 
 using System.Diagnostics;
-using Nop.Core.Telemetry;
-using static Nop.Core.Telemetry.NopActivitySources;
-using static Nop.Core.Telemetry.TelemetryMetrics;
+using Nop.Services;
 
 namespace Nop.Web.Controllers;
 
@@ -1252,8 +1250,7 @@ public partial class CheckoutController : BasePublicController
     public virtual async Task<IActionResult> ConfirmOrder(bool captchaValid)
     {
         var stopwatch = Stopwatch.StartNew();
-        // SPAN 
-        using var activity = Checkout.StartActivity("Checkout.ConfirmOrder", ActivityKind.Server);
+        using var activity = NopActivitySources.ActivitySource.StartActivity("Checkout.ConfirmOrder", ActivityKind.Server);
         try
         {
             activity?.SetTag("order.flowstage", "checkout.confirm");
@@ -1341,14 +1338,14 @@ public partial class CheckoutController : BasePublicController
             activity?.SetStatus(ActivityStatusCode.Error);
             activity?.SetTag("error.type", ex.GetType().Name);
             activity?.SetTag("error.message", ex.Message);
-            CheckoutDuration.Record((long)stopwatch.ElapsedMilliseconds, new[] { new KeyValuePair<string, object?>("stage", "confirm.failed") });
+            NopActivitySources.CheckoutDuration.Record((long)stopwatch.ElapsedMilliseconds, new[] { new KeyValuePair<string, object?>("stage", "confirm.failed") });
             throw;
         }
         finally
         {
             stopwatch.Stop();
-            CheckoutDuration.Record((long)stopwatch.ElapsedMilliseconds);
-            OrdersPlaced.Add(1); 
+            NopActivitySources.CheckoutDuration.Record((long)stopwatch.ElapsedMilliseconds);
+            NopActivitySources.OrdersPlaced.Add(1);
         }
     }
 

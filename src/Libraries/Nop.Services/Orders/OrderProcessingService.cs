@@ -33,9 +33,6 @@ using Nop.Services.Tax;
 using Nop.Services.Vendors;
 
 using System.Diagnostics;
-using Nop.Core.Telemetry;
-using static Nop.Core.Telemetry.NopActivitySources;
-using static Nop.Core.Telemetry.TelemetryMetrics;
 
 
 namespace Nop.Services.Orders;
@@ -493,8 +490,7 @@ public partial class OrderProcessingService : IOrderProcessingService
     {
         var stopwatch = Stopwatch.StartNew();
         // SPAN
-        using var activity = OrderProcessing.StartActivity("OrderProcessing.Basket", ActivityKind.Internal);
-
+        using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.Basket");
         try
         {
             activity?.SetTag("order.flow_stage", "basket_validation");
@@ -553,13 +549,12 @@ public partial class OrderProcessingService : IOrderProcessingService
             activity?.SetTag("error.type", ex.GetType().Name);
             activity?.SetTag("error.message", ex.Message);
             activity?.SetTag("error.flow_stage", "basket_validation");
-
             throw;
         }
         finally
         {
             stopwatch.Stop();
-            BasketValidationDuration.Record((long)stopwatch.ElapsedMilliseconds,
+            NopActivitySources.BasketValidationDuration.Record(stopwatch.ElapsedMilliseconds,
                 new KeyValuePair<string, object?>("items_count", details.Cart?.Count ?? 0));
         }
     }
@@ -573,10 +568,8 @@ public partial class OrderProcessingService : IOrderProcessingService
     /// <exception cref="NopException">Validation problems</exception>
     protected virtual async Task PrepareAndValidateBillingAddressAsync(PlaceOrderContainer details)
     {
-
         // SPAN
-        using var activity = OrderProcessing.StartActivity("OrderProcessing.Billing", ActivityKind.Internal);
-
+        using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.Billing");
         try
         {
             activity?.SetTag("order.flow_stage", "billing_validation");
@@ -587,7 +580,6 @@ public partial class OrderProcessingService : IOrderProcessingService
 
             var billingAddress = await _customerService.GetCustomerBillingAddressAsync(details.Customer);
 
-            // não meter email em tags
             if (!CommonHelper.IsValidEmail(billingAddress?.Email))
                 throw new NopException("Email is not valid");
 
@@ -603,7 +595,6 @@ public partial class OrderProcessingService : IOrderProcessingService
             activity?.SetTag("error.type", ex.GetType().Name);
             activity?.SetTag("error.message", ex.Message);
             activity?.SetTag("error.flow_stage", "billing_validation");
-
             throw;
         }
     }
@@ -623,8 +614,7 @@ public partial class OrderProcessingService : IOrderProcessingService
         Currency currentCurrency)
     {
         // SPAN
-        using var activity = OrderProcessing.StartActivity("OrderProcessing.Customer", ActivityKind.Internal);
-
+        using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.Customer");
         try
         {
             activity?.SetTag("order.flow_stage", "customer_validation");
@@ -641,8 +631,8 @@ public partial class OrderProcessingService : IOrderProcessingService
             var currencyTmp = await _currencyService.GetCurrencyByIdAsync(details.Customer.CurrencyId ?? 0);
             var customerCurrency = currencyTmp != null && currencyTmp.Published &&
                                 await _storeMappingService.AuthorizeAsync(currencyTmp)
-                ? currencyTmp
-                : currentCurrency;
+                    ? currencyTmp
+                    : currentCurrency;
             var primaryStoreCurrency = await _currencyService.GetCurrencyByIdAsync(_currencySettings.PrimaryStoreCurrencyId);
             details.CustomerCurrencyCode = customerCurrency.CurrencyCode;
             details.CustomerCurrencyRate = customerCurrency.Rate / primaryStoreCurrency.Rate;
@@ -660,7 +650,6 @@ public partial class OrderProcessingService : IOrderProcessingService
             activity?.SetTag("error.type", ex.GetType().Name);
             activity?.SetTag("error.message", ex.Message);
             activity?.SetTag("error.flow_stage", "customer_validation");
-
             throw;
         }
     }
@@ -1353,8 +1342,7 @@ public partial class OrderProcessingService : IOrderProcessingService
     protected virtual async Task MoveShoppingCartItemsToOrderItemsAsync(PlaceOrderContainer details, Order order)
     {
         // SPAN
-        using var activity = OrderProcessing.StartActivity("OrderProcessing.Inventory", ActivityKind.Internal);
-
+        using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.Inventory");
         try
         {
             activity?.SetTag("order.flow_stage", "inventory");
@@ -1444,7 +1432,6 @@ public partial class OrderProcessingService : IOrderProcessingService
             activity?.SetTag("error.type", ex.GetType().Name);
             activity?.SetTag("error.message", ex.Message);
             activity?.SetTag("error.flow_stage", "inventory");
-
             throw;
         }
     }
@@ -1502,8 +1489,7 @@ public partial class OrderProcessingService : IOrderProcessingService
     {
         var stopwatch = Stopwatch.StartNew();
         // SPAN
-        using var activity = OrderProcessing.StartActivity("OrderProcessing.Payment", ActivityKind.Internal);
-
+        using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.Payment");
         try
         {
             activity?.SetTag("order.flow_stage", "payment");
@@ -1548,7 +1534,7 @@ public partial class OrderProcessingService : IOrderProcessingService
 
             if (!processPaymentResult.Success)
             {
-                PaymentFailures.Add(1,
+                NopActivitySources.PaymentFailures.Add(1,
                     new KeyValuePair<string, object?>("payment_method", processPaymentRequest.PaymentMethodSystemName),
                     new KeyValuePair<string, object?>("status", processPaymentResult.NewPaymentStatus.ToString() ?? "failed"));
             }
@@ -1562,7 +1548,7 @@ public partial class OrderProcessingService : IOrderProcessingService
             activity?.SetTag("error.message", ex.Message);
             activity?.SetTag("error.flow_stage", "payment");
 
-            PaymentFailures.Add(1,
+            NopActivitySources.PaymentFailures.Add(1,
                 new KeyValuePair<string, object?>("payment_method", processPaymentRequest.PaymentMethodSystemName),
                 new KeyValuePair<string, object?>("error_type", ex.GetType().Name));
 
@@ -1571,7 +1557,7 @@ public partial class OrderProcessingService : IOrderProcessingService
         finally
         {
             stopwatch.Stop();
-            PaymentProcessingDuration.Record((long)stopwatch.ElapsedMilliseconds,
+            NopActivitySources.PaymentProcessingDuration.Record(stopwatch.ElapsedMilliseconds,
                 new KeyValuePair<string, object?>("payment_method", processPaymentRequest.PaymentMethodSystemName));
         }
     }
@@ -1720,46 +1706,43 @@ public partial class OrderProcessingService : IOrderProcessingService
     /// </returns>
     public virtual async Task<PlaceOrderResult> PlaceOrderAsync(ProcessPaymentRequest processPaymentRequest)
     {
+        var stopwatch = Stopwatch.StartNew();
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.PlaceOrder");
+        NopActivitySources.OrdersStarted.Add(1);
+        activity?.SetTag("order.flow_stage", "order_placement");
+        activity?.SetTag("customer.id", processPaymentRequest.CustomerId);
+        activity?.SetTag("store.id", processPaymentRequest.StoreId);
+
         ArgumentNullException.ThrowIfNull(processPaymentRequest);
 
         if (processPaymentRequest.OrderGuid == Guid.Empty)
             throw new Exception("Order GUID is not generated");
 
-        var stopwatch = Stopwatch.StartNew();
-        // SPAN
-        using var activity = OrderProcessing.StartActivity("OrderProcessing.PlaceOrder", ActivityKind.Internal);
         try
         {
-            activity?.SetTag("order.flow_stage", "order_placement");
-            activity?.SetTag("customer.id", processPaymentRequest.CustomerId);
-            activity?.SetTag("store.id", processPaymentRequest.StoreId);
-
-            // preparar detalhes da order
             var details = await PreparePlaceOrderDetailsAsync(processPaymentRequest);
 
             async Task<PlaceOrderResult> placeOrder(PlaceOrderContainer placeOrderContainer)
             {
+                using var innerActivity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.PlaceOrder.Core");
+                innerActivity?.SetTag("order.flow_stage", "order_core");
+
                 var result = new PlaceOrderResult();
 
                 try
                 {
-                    using var innerActivity = OrderProcessing.StartActivity("OrderProcessing.PlaceOrder.Core", ActivityKind.Internal);
-                    innerActivity?.SetTag("order.flow_stage", "order_core");
-
-                    var processPaymentResult =
-                        await GetProcessPaymentResultAsync(processPaymentRequest, placeOrderContainer)
-                        ?? throw new NopException("processPaymentResult is not available");
+                    var processPaymentResult = await GetProcessPaymentResultAsync(processPaymentRequest, placeOrderContainer)
+                                            ?? throw new NopException("processPaymentResult is not available");
 
                     if (processPaymentResult.Success)
                     {
-                        var order = await SaveOrderDetailsAsync(processPaymentRequest, processPaymentResult,
-                            placeOrderContainer);
+                        var order = await SaveOrderDetailsAsync(processPaymentRequest, processPaymentResult, placeOrderContainer);
                         result.PlacedOrder = order;
 
-                        OrdersPlaced.Add(1,
+                        NopActivitySources.OrdersPlaced.Add(1,
                             new KeyValuePair<string, object?>("payment_status", processPaymentResult.NewPaymentStatus.ToString()));
 
-                        // Basket → Inventory está tudo aqui dentro
                         await MoveShoppingCartItemsToOrderItemsAsync(placeOrderContainer, order);
                         await SaveDiscountUsageHistoryAsync(placeOrderContainer, order);
                         await SaveGiftCardUsageHistoryAsync(placeOrderContainer, order);
@@ -1768,18 +1751,19 @@ public partial class OrderProcessingService : IOrderProcessingService
                             await CreateFirstRecurringPaymentAsync(processPaymentRequest, order);
 
                         await SendNotificationsAndSaveNotesAsync(order);
-
-                        await _customerService.ResetCheckoutDataAsync(placeOrderContainer.Customer,
-                            processPaymentRequest.StoreId, clearCouponCodes: true, clearCheckoutAttributes: true);
+                        await _customerService.ResetCheckoutDataAsync(placeOrderContainer.Customer, processPaymentRequest.StoreId, true, true);
                         await _customerActivityService.InsertActivityAsync("PublicStore.PlaceOrder",
-                            string.Format(await _localizationService.GetResourceAsync("ActivityLog.PublicStore.PlaceOrder"),
-                                order.Id), order);
+                            string.Format(await _localizationService.GetResourceAsync("ActivityLog.PublicStore.PlaceOrder"), order.Id), order);
 
                         await _eventPublisher.PublishAsync(new OrderPlacedEvent(order));
                         await CheckOrderStatusAsync(order);
 
                         if (order.PaymentStatus == PaymentStatus.Paid)
                             await ProcessOrderPaidAsync(order);
+
+                        NopActivitySources.OrderValue.Record((double)order.OrderTotal);
+                        activity?.SetTag("order.total", order.OrderTotal);
+                        activity?.SetTag("order.id", order.Id);
                     }
                     else
                     {
@@ -1788,20 +1772,19 @@ public partial class OrderProcessingService : IOrderProcessingService
                             result.AddError(string.Format(
                                 await _localizationService.GetResourceAsync("Checkout.PaymentError"), paymentError));
                         }
-
-                        OrderFailures.Add(1,
+                        NopActivitySources.OrderFailures.Add(1,
                             new KeyValuePair<string, object?>("flow_stage", "payment"),
                             new KeyValuePair<string, object?>("reason", "payment_failed"));
                     }
                 }
                 catch (Exception exc)
                 {
-                    activity?.SetStatus(ActivityStatusCode.Error);
-                    activity?.SetTag("error.type", exc.GetType().Name);
-                    activity?.SetTag("error.message", exc.Message);
-                    activity?.SetTag("error.flow_stage", "order_core");
+                    innerActivity?.SetStatus(ActivityStatusCode.Error);
+                    innerActivity?.SetTag("error.type", exc.GetType().Name);
+                    innerActivity?.SetTag("error.message", exc.Message);
+                    innerActivity?.SetTag("error.flow_stage", "order_core");
 
-                    OrderFailures.Add(1,
+                    NopActivitySources.OrderFailures.Add(1,
                         new KeyValuePair<string, object?>("flow_stage", "order_core"),
                         new KeyValuePair<string, object?>("error_type", exc.GetType().Name));
 
@@ -1845,11 +1828,13 @@ public partial class OrderProcessingService : IOrderProcessingService
                     {
                         result = new PlaceOrderResult();
                         result.Errors.Add(_localizationService.GetResourceAsync("Checkout.MinOrderPlacementInterval").Result);
+                        NopActivitySources.OrderFailures.Add(1,
+                            new KeyValuePair<string, object?>("flow_stage", "lock"),
+                            new KeyValuePair<string, object?>("reason", "min_interval"));
                     }
                     else
                     {
                         result = placeOrder(details).Result;
-
                         if (result.Success)
                             _staticCacheManager.SetAsync(cacheKey, true).Wait();
                     }
@@ -1871,7 +1856,7 @@ public partial class OrderProcessingService : IOrderProcessingService
             activity?.SetTag("error.message", ex.Message);
             activity?.SetTag("error.flow_stage", "order_placement");
 
-            OrderFailures.Add(1,
+            NopActivitySources.OrderFailures.Add(1,
                 new KeyValuePair<string, object?>("flow_stage", "order_placement"),
                 new KeyValuePair<string, object?>("error_type", ex.GetType().Name));
 
@@ -1880,7 +1865,7 @@ public partial class OrderProcessingService : IOrderProcessingService
         finally
         {
             stopwatch.Stop();
-            OrderEndToEndDuration.Record((long)stopwatch.ElapsedMilliseconds,
+            NopActivitySources.OrderEndToEndDuration.Record(stopwatch.ElapsedMilliseconds,
                 new KeyValuePair<string, object?>("customer_id", processPaymentRequest.CustomerId));
         }
     }

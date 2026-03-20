@@ -1699,6 +1699,12 @@ public partial class ProductService : IProductService
     /// <returns>A task that represents the asynchronous operation</returns>
     public virtual async Task AdjustInventoryAsync(Product product, int quantityToChange, string attributesXml = "", string message = "")
     {
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("Inventory.Adjust");
+        activity?.SetTag("product.id", product?.Id);
+        activity?.SetTag("quantity.change", quantityToChange);
+        activity?.SetTag("inventory.before", product?.StockQuantity);
+        
         ArgumentNullException.ThrowIfNull(product);
 
         if (quantityToChange == 0)

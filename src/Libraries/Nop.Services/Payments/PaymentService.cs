@@ -5,9 +5,6 @@ using Nop.Services.Catalog;
 using Nop.Services.Customers;
 
 using System.Diagnostics;
-using Nop.Core.Telemetry;
-using static Nop.Core.Telemetry.NopActivitySources;
-using static Nop.Core.Telemetry.TelemetryMetrics;
 
 
 namespace Nop.Services.Payments;
@@ -54,25 +51,24 @@ public partial class PaymentService : IPaymentService
     /// A task that represents the asynchronous operation
     /// The task result contains the process payment result
     /// </returns>
+
+    // No método ProcessPaymentAsync:
     public virtual async Task<ProcessPaymentResult> ProcessPaymentAsync(ProcessPaymentRequest processPaymentRequest)
     {
-        var stopwatch = Stopwatch.StartNew();
         // SPAN
-        using var activity = Payment.StartActivity("Payment.ProcessPayment", ActivityKind.Client);
+        using var activity = NopActivitySources.ActivitySource.StartActivity("Payment.Process");
+        activity?.SetTag("payment.method", processPaymentRequest.PaymentMethodSystemName);
+        activity?.SetTag("customer.id", processPaymentRequest.CustomerId);
+        activity?.SetTag("order.total", processPaymentRequest.OrderTotal);
+
         try
         {
-            activity?.SetTag("payment.method", processPaymentRequest.PaymentMethodSystemName);
-            activity?.SetTag("payment.total", processPaymentRequest.OrderTotal);
-            activity?.SetTag("customer.id", processPaymentRequest.CustomerId);
-            activity?.SetTag("store.id", processPaymentRequest.StoreId);
-
             if (processPaymentRequest.OrderTotal == decimal.Zero)
             {
-                var paymentResult = new ProcessPaymentResult { NewPaymentStatus = PaymentStatus.Paid };
-                return paymentResult;
+                var result = new ProcessPaymentResult { NewPaymentStatus = PaymentStatus.Paid };
+                return result;
             }
 
-            // We should strip out any white space or dash in the CC number entered.
             if (!string.IsNullOrWhiteSpace(processPaymentRequest.CreditCardNumber))
             {
                 processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace(" ", string.Empty);
@@ -80,37 +76,25 @@ public partial class PaymentService : IPaymentService
             }
 
             var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
-            var paymentMethod = await _paymentPluginManager
-                .LoadPluginBySystemNameAsync(processPaymentRequest.PaymentMethodSystemName, customer, processPaymentRequest.StoreId)
-                ?? throw new NopException("Payment method couldn't be loaded");
+            var paymentMethod = await _paymentPluginManager.LoadPluginBySystemNameAsync(processPaymentRequest.PaymentMethodSystemName, customer, processPaymentRequest.StoreId)
+                                ?? throw new NopException("Payment method couldn't be loaded");
 
-            var result = await paymentMethod.ProcessPaymentAsync(processPaymentRequest);
+            var paymentResult = await paymentMethod.ProcessPaymentAsync(processPaymentRequest);
 
-            activity?.SetTag("payment.status", result.NewPaymentStatus.ToString());
-
-            if (!result.Success)
+            if (!paymentResult.Success)
             {
-                PaymentFailures.Add(1, new KeyValuePair<string, object?>("payment.method", processPaymentRequest.PaymentMethodSystemName),
-                    new KeyValuePair<string, object?>("status", result.NewPaymentStatus.ToString() ?? "failed"));
+                NopActivitySources.OrdersFailed.Add(1);
+                activity?.SetTag("payment.error", string.Join(",", paymentResult.Errors));
             }
 
-            return result;
+            return paymentResult;
         }
         catch (Exception ex)
         {
-            activity?.SetStatus(ActivityStatusCode.Error);
-            activity?.SetTag("error.type", ex.GetType().Name);
-            activity?.SetTag("error.message", ex.Message);
-            activity?.SetTag("error.flowstage", "payment");
-            PaymentFailures.Add(1, new KeyValuePair<string, object?>("payment.method", processPaymentRequest.PaymentMethodSystemName),
-                new KeyValuePair<string, object?>("error", ex.Message));
+            NopActivitySources.OrdersFailed.Add(1);
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            activity?.SetTag("exception", ex.ToString());
             throw;
-        }
-        finally
-        {
-            stopwatch.Stop();
-            PaymentProcessingDuration.Record((long)stopwatch.ElapsedMilliseconds,
-                new[] { new KeyValuePair<string, object?>("payment.method", processPaymentRequest.PaymentMethodSystemName) });
         }
     }
 

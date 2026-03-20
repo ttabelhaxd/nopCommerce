@@ -10,6 +10,8 @@ services:
       - "80:80"
     volumes:
       - nopcommerce_data:/app/App_Data
+    networks:
+      - nopcommerce_observability
 
   nopcommerce_database:
     image: "mcr.microsoft.com/mssql/server:2019-latest"
@@ -20,6 +22,9 @@ services:
       MSSQL_PID: "Express"
     volumes:
       - nopcommerce_db_data:/var/opt/mssql
+    networks:
+      - nopcommerce_observability
+
 
   telemetry_service:
     image: otel/opentelemetry-collector-contrib:latest
@@ -34,6 +39,8 @@ services:
     depends_on:
       - jaeger
       - loki
+    networks:
+      - nopcommerce_observability
 
   jaeger:
     image: jaegertracing/all-in-one:latest
@@ -41,6 +48,8 @@ services:
     ports:
       - "16686:16686"  # Jaeger UI
       - "14250:14250"  # Jaeger gRPC
+    networks:
+      - nopcommerce_observability
 
   prometheus:
     image: prom/prometheus:latest
@@ -51,6 +60,8 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
     depends_on:
       - telemetry_service
+    networks:
+      - nopcommerce_observability
 
   grafana:
     image: grafana/grafana:latest
@@ -65,6 +76,8 @@ services:
       - prometheus
       - jaeger
       - loki
+    networks:
+      - nopcommerce_observability
 
   loki:
     image: grafana/loki:latest
@@ -74,9 +87,15 @@ services:
     command: -config.file=/etc/loki/local-config.yaml
     volumes:
       - loki_data:/loki
+    networks:
+      - nopcommerce_observability
 
 volumes:
   nopcommerce_data:
   nopcommerce_db_data:
   grafana_data:
   loki_data:
+
+networks:
+  nopcommerce_observability:
+    driver: bridge
