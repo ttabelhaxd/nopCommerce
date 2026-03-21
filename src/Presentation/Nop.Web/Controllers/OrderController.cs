@@ -15,6 +15,9 @@ using Nop.Web.Factories;
 using Nop.Web.Framework.Controllers;
 using Nop.Web.Framework.Mvc.Filters;
 
+using System.Diagnostics;
+using Nop.Services;
+
 namespace Nop.Web.Controllers;
 
 [AutoValidateAntiforgeryToken]
@@ -76,6 +79,9 @@ public partial class OrderController : BasePublicController
     //My account / Orders
     public virtual async Task<IActionResult> CustomerOrders(int? pageNumber, OrderHistoryPeriods limit)
     {
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("Order.CustomerOrders", ActivityKind.Server);
+
         if (!await _customerService.IsRegisteredAsync(await _workContext.GetCurrentCustomerAsync()))
             return Challenge();
 
@@ -172,6 +178,10 @@ public partial class OrderController : BasePublicController
     //My account / Order details page
     public virtual async Task<IActionResult> Details(int orderId)
     {
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("Order.Details", ActivityKind.Server);
+        activity?.SetTag("order.id", orderId);
+        
         var order = await _orderService.GetOrderByIdAsync(orderId);
         var customer = await _workContext.GetCurrentCustomerAsync();
 
@@ -216,6 +226,10 @@ public partial class OrderController : BasePublicController
 
     public async Task<IActionResult> CancelOrder(int orderId)
     {
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("Order.Cancel", ActivityKind.Server);
+        activity?.SetTag("order.id", orderId);
+
         if(!_orderSettings.AllowCustomersCancelOrders)
             return RedirectToRoute(NopRouteNames.Standard.ORDER_DETAILS, new { orderId });
 
@@ -244,6 +258,10 @@ public partial class OrderController : BasePublicController
     //My account / Order details page / re-order
     public virtual async Task<IActionResult> ReOrder(int orderId)
     {
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("Order.ReOrder", ActivityKind.Server);
+        activity?.SetTag("order.id", orderId);
+        
         var order = await _orderService.GetOrderByIdAsync(orderId);
         var customer = await _workContext.GetCurrentCustomerAsync();
         if (order == null || order.Deleted || customer.Id != order.CustomerId)
@@ -263,6 +281,10 @@ public partial class OrderController : BasePublicController
     [FormValueRequired("repost-payment")]
     public virtual async Task<IActionResult> RePostPayment(int orderId)
     {
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("Order.RePostPayment", ActivityKind.Server);
+        activity?.SetTag("order.id", orderId);
+
         var order = await _orderService.GetOrderByIdAsync(orderId);
         var customer = await _workContext.GetCurrentCustomerAsync();
         if (order == null || order.Deleted || customer.Id != order.CustomerId)

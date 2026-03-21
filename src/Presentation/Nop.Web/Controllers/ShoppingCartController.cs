@@ -40,6 +40,9 @@ using Nop.Web.Infrastructure.Cache;
 using Nop.Web.Models.Media;
 using Nop.Web.Models.ShoppingCart;
 
+using System.Diagnostics;
+using Nop.Services;
+
 namespace Nop.Web.Controllers;
 
 [AutoValidateAntiforgeryToken]
@@ -790,6 +793,11 @@ public partial class ShoppingCartController : BasePublicController
     [HttpPost]
     public virtual async Task<IActionResult> AddProductToCart_Details(int productId, int shoppingCartTypeId, IFormCollection form, int? customwishlistid = null)
     {
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("ShoppingCart.AddProductToCart_Details", ActivityKind.Server);
+        activity?.SetTag("product.id", productId);
+        activity?.SetTag("shopping.cart.type", ((ShoppingCartType)shoppingCartTypeId).ToString());
+
         var product = await _productService.GetProductByIdAsync(productId);
         if (product == null)
         {
@@ -1257,6 +1265,9 @@ public partial class ShoppingCartController : BasePublicController
     [FormValueRequired("updatecart")]
     public virtual async Task<IActionResult> UpdateCart(IFormCollection form)
     {
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("ShoppingCart.UpdateCart", ActivityKind.Server);
+
         if (!await _permissionService.AuthorizeAsync(StandardPermission.PublicStore.ENABLE_SHOPPING_CART))
             return RedirectToRoute(NopRouteNames.General.HOMEPAGE);
 
@@ -1340,6 +1351,9 @@ public partial class ShoppingCartController : BasePublicController
     [FormValueRequired("checkout")]
     public virtual async Task<IActionResult> StartCheckout(IFormCollection form)
     {
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("ShoppingCart.StartCheckout", ActivityKind.Server);
+
         var customer = await _workContext.GetCurrentCustomerAsync();
         var store = await _storeContext.GetCurrentStoreAsync();
         var cart = await _shoppingCartService.GetShoppingCartAsync(customer, ShoppingCartType.ShoppingCart, store.Id);
@@ -1382,6 +1396,10 @@ public partial class ShoppingCartController : BasePublicController
     [FormValueRequired("applydiscountcouponcode")]
     public virtual async Task<IActionResult> ApplyDiscountCoupon(string discountcouponcode, IFormCollection form)
     {
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("ShoppingCart.ApplyDiscount", ActivityKind.Server);
+        activity?.SetTag("discount.code", discountcouponcode);
+
         //trim
         if (discountcouponcode != null)
             discountcouponcode = discountcouponcode.Trim();
@@ -1446,6 +1464,10 @@ public partial class ShoppingCartController : BasePublicController
     [FormValueRequired("applygiftcardcouponcode")]
     public virtual async Task<IActionResult> ApplyGiftCard(string giftcardcouponcode, IFormCollection form)
     {
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("ShoppingCart.ApplyGiftCard", ActivityKind.Server);
+        activity?.SetTag("giftcard.code", giftcardcouponcode);
+        
         //trim
         if (giftcardcouponcode != null)
             giftcardcouponcode = giftcardcouponcode.Trim();
