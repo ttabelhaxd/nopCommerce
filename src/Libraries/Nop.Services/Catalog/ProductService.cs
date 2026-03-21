@@ -18,6 +18,8 @@ using Nop.Services.Shipping.Date;
 using Nop.Services.Stores;
 using Nop.Services.Vendors;
 
+using Microsoft.Extensions.Logging;
+
 namespace Nop.Services.Catalog;
 
 /// <summary>
@@ -62,6 +64,7 @@ public partial class ProductService : IProductService
     protected readonly IWorkContext _workContext;
     protected readonly LocalizationSettings _localizationSettings;
     private static readonly char[] _separator = [','];
+    private readonly ILogger<ProductService> _logger;
 
     #endregion
 
@@ -100,7 +103,8 @@ public partial class ProductService : IProductService
         IVendorService vendorService,
         IStoreMappingService storeMappingService,
         IWorkContext workContext,
-        LocalizationSettings localizationSettings)
+        LocalizationSettings localizationSettings,
+        ILogger<ProductService> logger)
     {
         _catalogSettings = catalogSettings;
         _aclService = aclService;
@@ -136,6 +140,7 @@ public partial class ProductService : IProductService
         _vendorService = vendorService;
         _workContext = workContext;
         _localizationSettings = localizationSettings;
+        _logger = logger;
     }
 
     #endregion
@@ -1704,11 +1709,13 @@ public partial class ProductService : IProductService
         activity?.SetTag("product.id", product?.Id);
         activity?.SetTag("quantity.change", quantityToChange);
         activity?.SetTag("inventory.before", product?.StockQuantity);
-        
+
         ArgumentNullException.ThrowIfNull(product);
 
         if (quantityToChange == 0)
             return;
+
+        _logger.LogInformation("Adjusting inventory for product {ProductId}, quantity change: {QuantityChange}", product.Id, quantityToChange);
 
         if (product.ManageInventoryMethod == ManageInventoryMethod.ManageStock)
         {
@@ -1799,6 +1806,8 @@ public partial class ProductService : IProductService
             if (associatedProduct != null) 
                 await AdjustInventoryAsync(associatedProduct, quantityToChange * attributeValue.Quantity, message);
         }
+
+        _logger.LogInformation("Inventory adjusted for product {ProductId}. New stock: {NewStock}", product.Id, product.StockQuantity);
     }
 
     /// <summary>

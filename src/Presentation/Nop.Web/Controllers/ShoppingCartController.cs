@@ -42,6 +42,7 @@ using Nop.Web.Models.ShoppingCart;
 
 using System.Diagnostics;
 using Nop.Services;
+using Microsoft.Extensions.Logging;
 
 namespace Nop.Web.Controllers;
 
@@ -88,6 +89,7 @@ public partial class ShoppingCartController : BasePublicController
     protected readonly ShoppingCartSettings _shoppingCartSettings;
     protected readonly ShippingSettings _shippingSettings;
     private static readonly char[] _separator = [','];
+    private readonly ILogger<ShoppingCartController> _loggerMsft;
 
     #endregion
 
@@ -129,7 +131,8 @@ public partial class ShoppingCartController : BasePublicController
         MediaSettings mediaSettings,
         OrderSettings orderSettings,
         ShoppingCartSettings shoppingCartSettings,
-        ShippingSettings shippingSettings)
+        ShippingSettings shippingSettings,
+        ILogger<ShoppingCartController> loggerMsft)
     {
         _captchaSettings = captchaSettings;
         _customerSettings = customerSettings;
@@ -168,6 +171,7 @@ public partial class ShoppingCartController : BasePublicController
         _orderSettings = orderSettings;
         _shoppingCartSettings = shoppingCartSettings;
         _shippingSettings = shippingSettings;
+        _loggerMsft = loggerMsft;
     }
 
     #endregion
@@ -797,7 +801,8 @@ public partial class ShoppingCartController : BasePublicController
         using var activity = NopActivitySources.ActivitySource.StartActivity("ShoppingCart.AddProductToCart_Details", ActivityKind.Server);
         activity?.SetTag("product.id", productId);
         activity?.SetTag("shopping.cart.type", ((ShoppingCartType)shoppingCartTypeId).ToString());
-
+        _loggerMsft.LogInformation("Add product {ProductId} to cart type {CartType}, quantity {Quantity}", productId, (ShoppingCartType)shoppingCartTypeId, form["addtocart_1.EnteredQuantity"]);
+        
         var product = await _productService.GetProductByIdAsync(productId);
         if (product == null)
         {
@@ -1267,6 +1272,7 @@ public partial class ShoppingCartController : BasePublicController
     {
         // SPAN
         using var activity = NopActivitySources.ActivitySource.StartActivity("ShoppingCart.UpdateCart", ActivityKind.Server);
+        _loggerMsft.LogInformation("Updating shopping cart");
 
         if (!await _permissionService.AuthorizeAsync(StandardPermission.PublicStore.ENABLE_SHOPPING_CART))
             return RedirectToRoute(NopRouteNames.General.HOMEPAGE);
@@ -1353,6 +1359,7 @@ public partial class ShoppingCartController : BasePublicController
     {
         // SPAN
         using var activity = NopActivitySources.ActivitySource.StartActivity("ShoppingCart.StartCheckout", ActivityKind.Server);
+        _loggerMsft.LogInformation("Starting checkout process");
 
         var customer = await _workContext.GetCurrentCustomerAsync();
         var store = await _storeContext.GetCurrentStoreAsync();
@@ -1399,6 +1406,7 @@ public partial class ShoppingCartController : BasePublicController
         // SPAN
         using var activity = NopActivitySources.ActivitySource.StartActivity("ShoppingCart.ApplyDiscount", ActivityKind.Server);
         activity?.SetTag("discount.code", discountcouponcode);
+        _loggerMsft.LogInformation("Applying discount coupon: {DiscountCode}", discountcouponcode);
 
         //trim
         if (discountcouponcode != null)
@@ -1467,7 +1475,8 @@ public partial class ShoppingCartController : BasePublicController
         // SPAN
         using var activity = NopActivitySources.ActivitySource.StartActivity("ShoppingCart.ApplyGiftCard", ActivityKind.Server);
         activity?.SetTag("giftcard.code", giftcardcouponcode);
-        
+        _loggerMsft.LogInformation("Applying gift card: {GiftCardCode}", giftcardcouponcode);
+
         //trim
         if (giftcardcouponcode != null)
             giftcardcouponcode = giftcardcouponcode.Trim();

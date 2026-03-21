@@ -6,6 +6,7 @@ using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using OpenTelemetry.Exporter;
+using OpenTelemetry.Logs; 
 
 namespace Nop.Web;
 
@@ -25,7 +26,30 @@ public partial class Program
 
         builder.Services.ConfigureApplicationSettings(builder);
 
-        // OpenTelemetry configuration
+        // ----- Logging with OpenTelemetry -----
+        builder.Logging.ClearProviders();
+        builder.Logging.AddConsole();
+
+        builder.Logging.AddOpenTelemetry(options =>
+        {
+            options.SetResourceBuilder(ResourceBuilder.CreateDefault()
+                .AddService("nopcommerce-service", serviceVersion: "1.0.0"));
+
+            // Logs for ASP.NET Core
+            options.AddOtlpExporter(otlpOptions =>
+            {
+                otlpOptions.Endpoint = new Uri("http://telemetry_service:4318/v1/logs");
+                otlpOptions.Protocol = OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf;
+            });
+
+            // Exports logs to console (for debugging)
+            options.AddConsoleExporter();
+
+            options.IncludeFormattedMessage = true;
+            options.IncludeScopes = true;
+        });
+
+        // ----- Traces and Metrics with OpenTelemetry -----
         builder.Services.AddOpenTelemetry()
             .WithTracing(tracing =>
             {

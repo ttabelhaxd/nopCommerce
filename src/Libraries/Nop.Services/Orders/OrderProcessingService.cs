@@ -33,6 +33,7 @@ using Nop.Services.Tax;
 using Nop.Services.Vendors;
 
 using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 
 
 namespace Nop.Services.Orders;
@@ -60,7 +61,7 @@ public partial class OrderProcessingService : IOrderProcessingService
     protected readonly IGiftCardService _giftCardService;
     protected readonly ILanguageService _languageService;
     protected readonly ILocalizationService _localizationService;
-    protected readonly ILogger _logger;
+    protected readonly Nop.Services.Logging.ILogger _logger;
     protected readonly IOrderService _orderService;
     protected readonly IOrderTotalCalculationService _orderTotalCalculationService;
     protected readonly IPaymentPluginManager _paymentPluginManager;
@@ -92,6 +93,7 @@ public partial class OrderProcessingService : IOrderProcessingService
     protected readonly RewardPointsSettings _rewardPointsSettings;
     protected readonly ShippingSettings _shippingSettings;
     protected readonly TaxSettings _taxSettings;
+    private readonly ILogger<OrderProcessingService> _loggerMsft;
 
     #endregion
 
@@ -113,7 +115,7 @@ public partial class OrderProcessingService : IOrderProcessingService
         IGiftCardService giftCardService,
         ILanguageService languageService,
         ILocalizationService localizationService,
-        ILogger logger,
+        Nop.Services.Logging.ILogger logger,
         IOrderService orderService,
         IOrderTotalCalculationService orderTotalCalculationService,
         IPaymentPluginManager paymentPluginManager,
@@ -144,7 +146,8 @@ public partial class OrderProcessingService : IOrderProcessingService
         PaymentSettings paymentSettings,
         RewardPointsSettings rewardPointsSettings,
         ShippingSettings shippingSettings,
-        TaxSettings taxSettings)
+        TaxSettings taxSettings,
+        ILogger<OrderProcessingService> loggerMsft)
     {
         _currencySettings = currencySettings;
         _addressService = addressService;
@@ -194,6 +197,7 @@ public partial class OrderProcessingService : IOrderProcessingService
         _rewardPointsSettings = rewardPointsSettings;
         _shippingSettings = shippingSettings;
         _taxSettings = taxSettings;
+        _loggerMsft = loggerMsft;
     }
 
     #endregion
@@ -488,8 +492,8 @@ public partial class OrderProcessingService : IOrderProcessingService
         ProcessPaymentRequest processPaymentRequest,
         Currency currentCurrency)
     {
-        var stopwatch = Stopwatch.StartNew();
         // SPAN
+        var stopwatch = Stopwatch.StartNew();
         using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.Basket");
         try
         {
@@ -506,13 +510,18 @@ public partial class OrderProcessingService : IOrderProcessingService
 
             activity?.SetTag("basket.items_count", details.Cart.Count);
 
+            _loggerMsft.LogInformation("Validating shopping cart with {ItemCount} items for customer {CustomerId}", details.Cart.Count, details.Customer.Id);
+
             if (!details.Cart.Any())
                 throw new NopException("Cart is empty");
 
             var warnings = await _shoppingCartService.GetShoppingCartWarningsAsync(
                 details.Cart, details.CheckoutAttributesXml, true);
             if (warnings.Any())
+            {
+                _loggerMsft.LogWarning("Cart validation warnings: {Warnings}", string.Join("; ", warnings));
                 throw new NopException(warnings.Aggregate(string.Empty, (current, next) => $"{current}{next};"));
+            }
 
             foreach (var sci in details.Cart)
             {
@@ -522,25 +531,32 @@ public partial class OrderProcessingService : IOrderProcessingService
                     sci.ShoppingCartType, product, processPaymentRequest.StoreId, sci.AttributesXml,
                     sci.CustomerEnteredPrice, sci.RentalStartDateUtc, sci.RentalEndDateUtc, sci.Quantity, false, sci.Id);
                 if (sciWarnings.Any())
+                {
+                    _loggerMsft.LogWarning("Shopping cart item warnings for product {ProductId}: {Warnings}", product.Id, string.Join("; ", sciWarnings));
                     throw new NopException(sciWarnings.Aggregate(string.Empty, (current, next) => $"{current}{next};"));
+                }
             }
 
             if (!await ValidateMinOrderSubtotalAmountAsync(details.Cart))
             {
                 var minOrderSubtotalAmount = await _currencyService
                     .ConvertFromPrimaryStoreCurrencyAsync(_orderSettings.MinOrderSubtotalAmount, currentCurrency);
-                throw new NopException(string.Format(
+                var errorMsg = string.Format(
                     await _localizationService.GetResourceAsync("Checkout.MinOrderSubtotalAmount"),
-                    await _priceFormatter.FormatPriceAsync(minOrderSubtotalAmount, true, false)));
+                    await _priceFormatter.FormatPriceAsync(minOrderSubtotalAmount, true, false));
+                _loggerMsft.LogWarning("Minimum order subtotal validation failed: {Error}", errorMsg);
+                throw new NopException(errorMsg);
             }
 
             if (!await ValidateMinOrderTotalAmountAsync(details.Cart))
             {
                 var minOrderTotalAmount = await _currencyService
                     .ConvertFromPrimaryStoreCurrencyAsync(_orderSettings.MinOrderTotalAmount, currentCurrency);
-                throw new NopException(string.Format(
+                var errorMsg = string.Format(
                     await _localizationService.GetResourceAsync("Checkout.MinOrderTotalAmount"),
-                    await _priceFormatter.FormatPriceAsync(minOrderTotalAmount, true, false)));
+                    await _priceFormatter.FormatPriceAsync(minOrderTotalAmount, true, false));
+                _loggerMsft.LogWarning("Minimum order total validation failed: {Error}", errorMsg);
+                throw new NopException(errorMsg);
             }
         }
         catch (Exception ex)
@@ -549,6 +565,7 @@ public partial class OrderProcessingService : IOrderProcessingService
             activity?.SetTag("error.type", ex.GetType().Name);
             activity?.SetTag("error.message", ex.Message);
             activity?.SetTag("error.flow_stage", "basket_validation");
+            _loggerMsft.LogError(ex, "Error during basket validation for customer {CustomerId}", details.Customer?.Id);
             throw;
         }
         finally
@@ -588,6 +605,8 @@ public partial class OrderProcessingService : IOrderProcessingService
             if (await _countryService.GetCountryByAddressAsync(details.BillingAddress) is Country billingCountry &&
                 !billingCountry.AllowsBilling)
                 throw new NopException($"Country '{billingCountry.Name}' is not allowed for billing");
+
+            _loggerMsft.LogInformation("Billing address validated for customer {CustomerId}, Address: {Address}", details.Customer.Id, details.BillingAddress?.Address1);
         }
         catch (Exception ex)
         {
@@ -595,6 +614,7 @@ public partial class OrderProcessingService : IOrderProcessingService
             activity?.SetTag("error.type", ex.GetType().Name);
             activity?.SetTag("error.message", ex.Message);
             activity?.SetTag("error.flow_stage", "billing_validation");
+            _loggerMsft.LogError(ex, "Error validating billing address for customer {CustomerId}", details.Customer?.Id);
             throw;
         }
     }
@@ -643,6 +663,9 @@ public partial class OrderProcessingService : IOrderProcessingService
             {
                 details.CustomerLanguage = await _workContext.GetWorkingLanguageAsync();
             }
+
+            _loggerMsft.LogInformation("Customer validated: Id={CustomerId}, IsGuest={IsGuest}, Currency={Currency}, Language={Language}",
+                details.Customer.Id, await _customerService.IsGuestAsync(details.Customer), details.CustomerCurrencyCode, details.CustomerLanguage?.Name);
         }
         catch (Exception ex)
         {
@@ -650,10 +673,10 @@ public partial class OrderProcessingService : IOrderProcessingService
             activity?.SetTag("error.type", ex.GetType().Name);
             activity?.SetTag("error.message", ex.Message);
             activity?.SetTag("error.flow_stage", "customer_validation");
+            _loggerMsft.LogError(ex, "Error validating customer {CustomerId}", processPaymentRequest.CustomerId);
             throw;
         }
     }
-
 
     /// <summary>
     /// Prepare details to place order based on the recurring payment.
@@ -1349,6 +1372,8 @@ public partial class OrderProcessingService : IOrderProcessingService
             activity?.SetTag("order.id", order.Id);
             activity?.SetTag("inventory.items_count", details.Cart?.Count ?? 0);
 
+            _loggerMsft.LogInformation("Moving {ItemCount} shopping cart items to order items for OrderId {OrderId}", details.Cart?.Count ?? 0, order.Id);
+
             foreach (var sc in details.Cart)
             {
                 var product = await _productService.GetProductByIdAsync(sc.ProductId);
@@ -1425,6 +1450,8 @@ public partial class OrderProcessingService : IOrderProcessingService
             }
 
             await _shoppingCartService.ClearShoppingCartAsync(details.Customer, order.StoreId);
+
+            _loggerMsft.LogInformation("Shopping cart items moved to order items for OrderId {OrderId}", order.Id);
         }
         catch (Exception ex)
         {
@@ -1432,10 +1459,10 @@ public partial class OrderProcessingService : IOrderProcessingService
             activity?.SetTag("error.type", ex.GetType().Name);
             activity?.SetTag("error.message", ex.Message);
             activity?.SetTag("error.flow_stage", "inventory");
+            _loggerMsft.LogError(ex, "Error moving shopping cart items to order items for OrderId {OrderId}", order.Id);
             throw;
         }
     }
-
 
     /// <summary>
     /// Add gift cards
@@ -1487,8 +1514,8 @@ public partial class OrderProcessingService : IOrderProcessingService
         ProcessPaymentRequest processPaymentRequest,
         PlaceOrderContainer details)
     {
-        var stopwatch = Stopwatch.StartNew();
         // SPAN
+        var stopwatch = Stopwatch.StartNew();
         using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.Payment");
         try
         {
@@ -1496,6 +1523,9 @@ public partial class OrderProcessingService : IOrderProcessingService
             activity?.SetTag("customer.id", processPaymentRequest.CustomerId);
             activity?.SetTag("store.id", processPaymentRequest.StoreId);
             activity?.SetTag("payment.method", processPaymentRequest.PaymentMethodSystemName);
+
+            _loggerMsft.LogInformation("Processing payment for customer {CustomerId}, method {PaymentMethod}, order total {OrderTotal}",
+                processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName, processPaymentRequest.OrderTotal);
 
             ProcessPaymentResult processPaymentResult;
 
@@ -1528,15 +1558,23 @@ public partial class OrderProcessingService : IOrderProcessingService
             else
             {
                 processPaymentResult = new ProcessPaymentResult { NewPaymentStatus = PaymentStatus.Paid };
+                _loggerMsft.LogInformation("Payment workflow not required (order total zero) for customer {CustomerId}", processPaymentRequest.CustomerId);
             }
 
             activity?.SetTag("payment.status", processPaymentResult.NewPaymentStatus.ToString());
 
             if (!processPaymentResult.Success)
             {
+                _loggerMsft.LogWarning("Payment failed for customer {CustomerId}, method {PaymentMethod}. Errors: {Errors}",
+                    processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName, string.Join("; ", processPaymentResult.Errors));
                 NopActivitySources.PaymentFailures.Add(1,
                     new KeyValuePair<string, object?>("payment_method", processPaymentRequest.PaymentMethodSystemName),
                     new KeyValuePair<string, object?>("status", processPaymentResult.NewPaymentStatus.ToString() ?? "failed"));
+            }
+            else
+            {
+                _loggerMsft.LogInformation("Payment succeeded for customer {CustomerId}, method {PaymentMethod}, status {PaymentStatus}",
+                    processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName, processPaymentResult.NewPaymentStatus);
             }
 
             return processPaymentResult;
@@ -1552,6 +1590,8 @@ public partial class OrderProcessingService : IOrderProcessingService
                 new KeyValuePair<string, object?>("payment_method", processPaymentRequest.PaymentMethodSystemName),
                 new KeyValuePair<string, object?>("error_type", ex.GetType().Name));
 
+            _loggerMsft.LogError(ex, "Error processing payment for customer {CustomerId}, method {PaymentMethod}",
+                processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName);
             throw;
         }
         finally
@@ -1706,8 +1746,8 @@ public partial class OrderProcessingService : IOrderProcessingService
     /// </returns>
     public virtual async Task<PlaceOrderResult> PlaceOrderAsync(ProcessPaymentRequest processPaymentRequest)
     {
-        var stopwatch = Stopwatch.StartNew();
         // SPAN
+        var stopwatch = Stopwatch.StartNew();
         using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.PlaceOrder");
         NopActivitySources.OrdersStarted.Add(1);
         activity?.SetTag("order.flow_stage", "order_placement");
@@ -1718,6 +1758,8 @@ public partial class OrderProcessingService : IOrderProcessingService
 
         if (processPaymentRequest.OrderGuid == Guid.Empty)
             throw new Exception("Order GUID is not generated");
+
+        _loggerMsft.LogInformation("Starting order placement for customer {CustomerId}, store {StoreId}", processPaymentRequest.CustomerId, processPaymentRequest.StoreId);
 
         try
         {
@@ -1764,6 +1806,8 @@ public partial class OrderProcessingService : IOrderProcessingService
                         NopActivitySources.OrderValue.Record((double)order.OrderTotal);
                         activity?.SetTag("order.total", order.OrderTotal);
                         activity?.SetTag("order.id", order.Id);
+
+                        _loggerMsft.LogInformation("Order placed successfully. OrderId: {OrderId}, Total: {OrderTotal}", order.Id, order.OrderTotal);
                     }
                     else
                     {
@@ -1775,6 +1819,8 @@ public partial class OrderProcessingService : IOrderProcessingService
                         NopActivitySources.OrderFailures.Add(1,
                             new KeyValuePair<string, object?>("flow_stage", "payment"),
                             new KeyValuePair<string, object?>("reason", "payment_failed"));
+
+                        _loggerMsft.LogWarning("Payment failed for order placement. Errors: {Errors}", string.Join("; ", processPaymentResult.Errors));
                     }
                 }
                 catch (Exception exc)
@@ -1788,6 +1834,7 @@ public partial class OrderProcessingService : IOrderProcessingService
                         new KeyValuePair<string, object?>("flow_stage", "order_core"),
                         new KeyValuePair<string, object?>("error_type", exc.GetType().Name));
 
+                    _loggerMsft.LogError(exc, "Error during order placement core processing for customer {CustomerId}", processPaymentRequest.CustomerId);
                     await _logger.ErrorAsync(exc.Message, exc);
                     result.AddError("Internal error while placing order.");
                 }
@@ -1831,6 +1878,8 @@ public partial class OrderProcessingService : IOrderProcessingService
                         NopActivitySources.OrderFailures.Add(1,
                             new KeyValuePair<string, object?>("flow_stage", "lock"),
                             new KeyValuePair<string, object?>("reason", "min_interval"));
+
+                        _loggerMsft.LogWarning("Order placement blocked due to minimum interval requirement for customer {CustomerId}", processPaymentRequest.CustomerId);
                     }
                     else
                     {
@@ -1860,6 +1909,7 @@ public partial class OrderProcessingService : IOrderProcessingService
                 new KeyValuePair<string, object?>("flow_stage", "order_placement"),
                 new KeyValuePair<string, object?>("error_type", ex.GetType().Name));
 
+            _loggerMsft.LogError(ex, "Unexpected error in PlaceOrderAsync for customer {CustomerId}", processPaymentRequest.CustomerId);
             throw;
         }
         finally
@@ -2298,7 +2348,7 @@ public partial class OrderProcessingService : IOrderProcessingService
 
         //log it
         var logError = $"Error cancelling recurring payment. Order #{initialOrder.Id}. Error: {error}";
-        await _logger.InsertLogAsync(LogLevel.Error, logError, logError);
+        await _logger.InsertLogAsync(Nop.Core.Domain.Logging.LogLevel.Error, logError, logError);
         return result.Errors;
     }
 
@@ -2703,7 +2753,7 @@ public partial class OrderProcessingService : IOrderProcessingService
 
         //log it
         var logError = $"Error capturing order #{order.Id}. Error: {error}";
-        await _logger.InsertLogAsync(LogLevel.Error, logError, logError);
+        await _logger.InsertLogAsync(Nop.Core.Domain.Logging.LogLevel.Error, logError, logError);
         return result.Errors;
     }
 
@@ -2857,7 +2907,7 @@ public partial class OrderProcessingService : IOrderProcessingService
 
         //log it
         var logError = $"Error refunding order #{order.Id}. Error: {error}";
-        await _logger.InsertLogAsync(LogLevel.Error, logError, logError);
+        await _logger.InsertLogAsync(Nop.Core.Domain.Logging.LogLevel.Error, logError, logError);
 
         return result.Errors;
     }
@@ -3044,7 +3094,7 @@ public partial class OrderProcessingService : IOrderProcessingService
 
         //log it
         var logError = $"Error refunding order #{order.Id}. Error: {error}";
-        await _logger.InsertLogAsync(LogLevel.Error, logError, logError);
+        await _logger.InsertLogAsync(Nop.Core.Domain.Logging.LogLevel.Error, logError, logError);
         return result.Errors;
     }
 
@@ -3207,7 +3257,7 @@ public partial class OrderProcessingService : IOrderProcessingService
 
         //log it
         var logError = $"Error voiding order #{order.Id}. Error: {error}";
-        await _logger.InsertLogAsync(LogLevel.Error, logError, logError);
+        await _logger.InsertLogAsync(Nop.Core.Domain.Logging.LogLevel.Error, logError, logError);
         return result.Errors;
     }
 

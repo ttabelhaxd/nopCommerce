@@ -17,6 +17,7 @@ using Nop.Web.Framework.Mvc.Filters;
 
 using System.Diagnostics;
 using Nop.Services;
+using Microsoft.Extensions.Logging;
 
 namespace Nop.Web.Controllers;
 
@@ -38,6 +39,7 @@ public partial class OrderController : BasePublicController
     protected readonly IWorkContext _workContext;
     protected readonly OrderSettings _orderSettings;
     protected readonly RewardPointsSettings _rewardPointsSettings;
+    private readonly ILogger<OrderController> _loggerMsft;
 
     #endregion
 
@@ -55,7 +57,8 @@ public partial class OrderController : BasePublicController
         IWebHelper webHelper,
         IWorkContext workContext,
         OrderSettings orderSettings,
-        RewardPointsSettings rewardPointsSettings)
+        RewardPointsSettings rewardPointsSettings,
+        ILogger<OrderController> loggerMsft)
     {
         _customerService = customerService;
         _localizationService = localizationService;
@@ -70,6 +73,7 @@ public partial class OrderController : BasePublicController
         _workContext = workContext;
         _orderSettings = orderSettings;
         _rewardPointsSettings = rewardPointsSettings;
+        _loggerMsft = loggerMsft;
     }
 
     #endregion
@@ -81,6 +85,7 @@ public partial class OrderController : BasePublicController
     {
         // SPAN
         using var activity = NopActivitySources.ActivitySource.StartActivity("Order.CustomerOrders", ActivityKind.Server);
+        _loggerMsft.LogInformation("CustomerOrders accessed. PageNumber: {PageNumber}, Limit: {Limit}", pageNumber, limit);
 
         if (!await _customerService.IsRegisteredAsync(await _workContext.GetCurrentCustomerAsync()))
             return Challenge();
@@ -181,12 +186,16 @@ public partial class OrderController : BasePublicController
         // SPAN
         using var activity = NopActivitySources.ActivitySource.StartActivity("Order.Details", ActivityKind.Server);
         activity?.SetTag("order.id", orderId);
-        
+        _loggerMsft.LogInformation("Loading order details for OrderId: {OrderId}", orderId);
+
         var order = await _orderService.GetOrderByIdAsync(orderId);
         var customer = await _workContext.GetCurrentCustomerAsync();
 
         if (order == null || order.Deleted || customer.Id != order.CustomerId)
+        {
+            _loggerMsft.LogWarning("Order details requested for non-existent or unauthorized order. OrderId: {OrderId}, CustomerId: {CustomerId}", orderId, customer.Id);
             return Challenge();
+        }
 
         var model = await _orderModelFactory.PrepareOrderDetailsModelAsync(order);
         return View(model);
@@ -229,6 +238,7 @@ public partial class OrderController : BasePublicController
         // SPAN
         using var activity = NopActivitySources.ActivitySource.StartActivity("Order.Cancel", ActivityKind.Server);
         activity?.SetTag("order.id", orderId);
+        _loggerMsft.LogInformation("Attempting to cancel order {OrderId}", orderId);
 
         if(!_orderSettings.AllowCustomersCancelOrders)
             return RedirectToRoute(NopRouteNames.Standard.ORDER_DETAILS, new { orderId });
@@ -245,12 +255,14 @@ public partial class OrderController : BasePublicController
         }
         catch
         {
+            _loggerMsft.LogError("Failed to cancel order {OrderId} for customer {CustomerId}", orderId, customer.Id);
             _notificationService.ErrorNotification(await _localizationService.GetResourceAsync("Order.Cancel.Failed"));
             return RedirectToRoute(NopRouteNames.Standard.ORDER_DETAILS, new { orderId });
         }
 
         await _orderService.UpdateOrderAsync(order);
-       _notificationService.SuccessNotification(await _localizationService.GetResourceAsync("Order.Cancelled"));
+        _notificationService.SuccessNotification(await _localizationService.GetResourceAsync("Order.Cancelled"));
+        _loggerMsft.LogInformation("Order {OrderId} cancelled successfully", orderId);
 
         return RedirectToRoute(NopRouteNames.Standard.ORDER_DETAILS, new { orderId });
     }
@@ -261,7 +273,8 @@ public partial class OrderController : BasePublicController
         // SPAN
         using var activity = NopActivitySources.ActivitySource.StartActivity("Order.ReOrder", ActivityKind.Server);
         activity?.SetTag("order.id", orderId);
-        
+        _loggerMsft.LogInformation("Re-order requested for order {OrderId}", orderId);
+
         var order = await _orderService.GetOrderByIdAsync(orderId);
         var customer = await _workContext.GetCurrentCustomerAsync();
         if (order == null || order.Deleted || customer.Id != order.CustomerId)
@@ -270,20 +283,23 @@ public partial class OrderController : BasePublicController
         var warnings = await _orderProcessingService.ReOrderAsync(order);
 
         if (warnings.Any())
+        {
+            _loggerMsft.LogWarning("Re-order warnings for order {OrderId}: {Warnings}", orderId, string.Join("; ", warnings));
             _notificationService.WarningNotification(await _localizationService.GetResourceAsync("ShoppingCart.ReorderWarning"));
+        }
 
         return RedirectToRoute(NopRouteNames.General.CART);
     }
 
     //My account / Order details page / Complete payment
     [HttpPost, ActionName("Details")]
-
     [FormValueRequired("repost-payment")]
     public virtual async Task<IActionResult> RePostPayment(int orderId)
     {
         // SPAN
         using var activity = NopActivitySources.ActivitySource.StartActivity("Order.RePostPayment", ActivityKind.Server);
         activity?.SetTag("order.id", orderId);
+        _loggerMsft.LogInformation("Repost payment for order {OrderId}", orderId);
 
         var order = await _orderService.GetOrderByIdAsync(orderId);
         var customer = await _workContext.GetCurrentCustomerAsync();

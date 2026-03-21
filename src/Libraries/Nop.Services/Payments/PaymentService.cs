@@ -5,6 +5,7 @@ using Nop.Services.Catalog;
 using Nop.Services.Customers;
 
 using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 
 
 namespace Nop.Services.Payments;
@@ -21,6 +22,7 @@ public partial class PaymentService : IPaymentService
     protected readonly IPriceCalculationService _priceCalculationService;
     protected readonly PaymentSettings _paymentSettings;
     protected readonly ShoppingCartSettings _shoppingCartSettings;
+    private readonly ILogger<ProductService> _logger;
 
     #endregion
 
@@ -30,13 +32,15 @@ public partial class PaymentService : IPaymentService
         IPaymentPluginManager paymentPluginManager,
         IPriceCalculationService priceCalculationService,
         PaymentSettings paymentSettings,
-        ShoppingCartSettings shoppingCartSettings)
+        ShoppingCartSettings shoppingCartSettings,
+        ILogger<ProductService> logger)
     {
         _customerService = customerService;
         _paymentPluginManager = paymentPluginManager;
         _priceCalculationService = priceCalculationService;
         _paymentSettings = paymentSettings;
         _shoppingCartSettings = shoppingCartSettings;
+        _logger = logger;
     }
 
     #endregion
@@ -61,11 +65,15 @@ public partial class PaymentService : IPaymentService
         activity?.SetTag("customer.id", processPaymentRequest.CustomerId);
         activity?.SetTag("order.total", processPaymentRequest.OrderTotal);
 
+        _logger.LogInformation("Processing payment for customer {CustomerId}, method {PaymentMethod}, order total {OrderTotal}",
+            processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName, processPaymentRequest.OrderTotal);
+
         try
         {
             if (processPaymentRequest.OrderTotal == decimal.Zero)
             {
                 var result = new ProcessPaymentResult { NewPaymentStatus = PaymentStatus.Paid };
+                _logger.LogInformation("Order total is zero, payment marked as paid for customer {CustomerId}", processPaymentRequest.CustomerId);
                 return result;
             }
 
@@ -85,6 +93,13 @@ public partial class PaymentService : IPaymentService
             {
                 NopActivitySources.OrdersFailed.Add(1);
                 activity?.SetTag("payment.error", string.Join(",", paymentResult.Errors));
+                _logger.LogWarning("Payment failed for customer {CustomerId}, method {PaymentMethod}. Errors: {Errors}",
+                    processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName, string.Join("; ", paymentResult.Errors));
+            }
+            else
+            {
+                _logger.LogInformation("Payment succeeded for customer {CustomerId}, method {PaymentMethod}, status {PaymentStatus}",
+                    processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName, paymentResult.NewPaymentStatus);
             }
 
             return paymentResult;
@@ -94,6 +109,8 @@ public partial class PaymentService : IPaymentService
             NopActivitySources.OrdersFailed.Add(1);
             activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
             activity?.SetTag("exception", ex.ToString());
+            _logger.LogError(ex, "Exception processing payment for customer {CustomerId}, method {PaymentMethod}",
+                processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName);
             throw;
         }
     }

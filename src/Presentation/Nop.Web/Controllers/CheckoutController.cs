@@ -29,6 +29,7 @@ using ILogger = Nop.Services.Logging.ILogger;
 
 using System.Diagnostics;
 using Nop.Services;
+using Microsoft.Extensions.Logging;
 
 namespace Nop.Web.Controllers;
 
@@ -66,6 +67,7 @@ public partial class CheckoutController : BasePublicController
     protected readonly ShippingSettings _shippingSettings;
     protected readonly TaxSettings _taxSettings;
     private static readonly string[] _separator = ["___"];
+    private readonly ILogger<CheckoutController> _loggerMsft;
 
     #endregion
 
@@ -98,7 +100,8 @@ public partial class CheckoutController : BasePublicController
         PaymentSettings paymentSettings,
         RewardPointsSettings rewardPointsSettings,
         ShippingSettings shippingSettings,
-        TaxSettings taxSettings)
+        TaxSettings taxSettings,
+        ILogger<CheckoutController> loggerMsft)
     {
         _addressSettings = addressSettings;
         _captchaSettings = captchaSettings;
@@ -128,6 +131,7 @@ public partial class CheckoutController : BasePublicController
         _rewardPointsSettings = rewardPointsSettings;
         _shippingSettings = shippingSettings;
         _taxSettings = taxSettings;
+        _loggerMsft = loggerMsft;
     }
 
     #endregion
@@ -1249,12 +1253,15 @@ public partial class CheckoutController : BasePublicController
     [ValidateCaptcha]
     public virtual async Task<IActionResult> ConfirmOrder(bool captchaValid)
     {
+        // SPAN
         var stopwatch = Stopwatch.StartNew();
         using var activity = NopActivitySources.ActivitySource.StartActivity("Checkout.ConfirmOrder", ActivityKind.Server);
         try
         {
             activity?.SetTag("order.flowstage", "checkout.confirm");
             activity?.SetTag("customer.id", (await _workContext.GetCurrentCustomerAsync()).Id);
+
+            _loggerMsft.LogInformation("ConfirmOrder started for customer {CustomerId}", (await _workContext.GetCurrentCustomerAsync()).Id);
 
             if (_orderSettings.CheckoutDisabled)
                 return RedirectToRoute("ShoppingCart");
@@ -1276,6 +1283,7 @@ public partial class CheckoutController : BasePublicController
             // captcha validation for guest customers
             if (isCaptchaSettingEnabled && !captchaValid)
             {
+                _loggerMsft.LogWarning("Captcha validation failed for guest customer {CustomerId}", customer.Id);
                 model.Warnings.Add(await _localizationService.GetResourceAsync("Common.WrongCaptchaMessage"));
                 return View(model);
             }
@@ -1311,6 +1319,8 @@ public partial class CheckoutController : BasePublicController
                     };
                     await _paymentService.PostProcessPaymentAsync(postProcessPaymentRequest);
 
+                    _loggerMsft.LogInformation("Order placed successfully. OrderId: {OrderId}, Customer: {CustomerId}", placeOrderResult.PlacedOrder.Id, customer.Id);
+
                     if (_webHelper.IsRequestBeingRedirected || _webHelper.IsPostBeingDone)
                     {
                         //redirection or POST has been done in PostProcessPayment
@@ -1322,11 +1332,15 @@ public partial class CheckoutController : BasePublicController
                     }
                 }
                 else
+                {
+                    _loggerMsft.LogWarning("Order placement failed for customer {CustomerId}. Errors: {Errors}", customer.Id, string.Join("; ", placeOrderResult.Errors));
                     foreach (var error in placeOrderResult.Errors)
                         model.Warnings.Add(error);
+                }
             }
             catch (Exception exc)
             {
+                _loggerMsft.LogError(exc, "Exception during order placement for customer {CustomerId}", customer.Id);
                 await _logger.WarningAsync(exc.Message, exc);
                 model.Warnings.Add(exc.Message);
             }
@@ -1335,6 +1349,7 @@ public partial class CheckoutController : BasePublicController
         }
         catch (Exception ex)
         {
+            _loggerMsft.LogError(ex, "Unexpected error in ConfirmOrder");
             activity?.SetStatus(ActivityStatusCode.Error);
             activity?.SetTag("error.type", ex.GetType().Name);
             activity?.SetTag("error.message", ex.Message);
