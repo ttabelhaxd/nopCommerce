@@ -2,11 +2,10 @@
 using Nop.Core.Configuration;
 using Nop.Core.Infrastructure;
 using Nop.Web.Framework.Infrastructure.Extensions;
-using OpenTelemetry.Metrics;
+
+using OpenTelemetry.Logs;
 using OpenTelemetry.Resources;
-using OpenTelemetry.Trace;
-using OpenTelemetry.Exporter;
-using OpenTelemetry.Logs; 
+using Nop.Services;
 
 namespace Nop.Web;
 
@@ -24,65 +23,29 @@ public partial class Program
         }
         builder.Configuration.AddEnvironmentVariables();
 
-        builder.Services.ConfigureApplicationSettings(builder);
-
-        // ----- Logging with OpenTelemetry -----
+        // Logging with OpenTelemetry
         builder.Logging.ClearProviders();
         builder.Logging.AddConsole();
 
         builder.Logging.AddOpenTelemetry(options =>
         {
             options.SetResourceBuilder(ResourceBuilder.CreateDefault()
-                .AddService("nopcommerce-service", serviceVersion: "1.0.0"));
+                .AddService("nopcommerce-service"));
 
-            // Logs for ASP.NET Core
+            // Exports logs to an OpenTelemetry Collector using the OTLP protocol
             options.AddOtlpExporter(otlpOptions =>
             {
                 otlpOptions.Endpoint = new Uri("http://telemetry_service:4318/v1/logs");
                 otlpOptions.Protocol = OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf;
             });
 
-            // Exports logs to console (for debugging)
             options.AddConsoleExporter();
-
             options.IncludeFormattedMessage = true;
             options.IncludeScopes = true;
         });
 
-        // ----- Traces and Metrics with OpenTelemetry -----
-        builder.Services.AddOpenTelemetry()
-            .WithTracing(tracing =>
-            {
-                tracing.AddSource("nopCommerce.OrderFlow")
-                    .AddSource("nopCommerce.Catalog")
-                    .SetResourceBuilder(ResourceBuilder.CreateDefault()
-                        .AddService("nopCommerce", serviceVersion: "1.0.0"))
-                    .AddAspNetCoreInstrumentation(options =>
-                    {
-                        options.RecordException = true;
-                        options.Filter = ctx => 
-                            !ctx.Request.Path.StartsWithSegments("/health") &&
-                            !ctx.Request.Path.StartsWithSegments("/metrics");
-                    })
-                    .AddHttpClientInstrumentation()
-                    .AddEntityFrameworkCoreInstrumentation(options =>
-                    {
-                        options.SetDbStatementForText = true;
-                    })
-                    .AddProcessor(new SensitiveDataProcessor())
-                    .AddOtlpExporter(options =>
-                    {
-                        options.Endpoint = new Uri("http://telemetry_service:4317"); 
-                        options.Protocol = OtlpExportProtocol.Grpc;
-                    });
-            })
-            .WithMetrics(metrics =>
-            {
-                metrics.AddAspNetCoreInstrumentation()
-                       .AddHttpClientInstrumentation()
-                       .AddMeter("nopCommerce.OrderMetrics")
-                       .AddPrometheusExporter();
-            });
+        //load application settings
+        builder.Services.ConfigureApplicationSettings(builder);
 
         var appSettings = Singleton<AppSettings>.Instance;
         var useAutofac = appSettings.Get<CommonConfig>().UseAutofac;
@@ -98,13 +61,14 @@ public partial class Program
             });
         }
 
+        //add services to the application and configure service provider
         builder.Services.ConfigureApplicationServices(builder);
 
+        var telemetry = NopActivitySources.ActivitySource;
         var app = builder.Build();
+        app.Lifetime.ApplicationStopping.Register(() => telemetry.Dispose());
 
-        // Prometheus scraping endpoint
-        app.UseOpenTelemetryPrometheusScrapingEndpoint();
-
+        //configure the application HTTP request pipeline
         app.ConfigureRequestPipeline();
         await app.PublishAppStartedEventAsync();
 
