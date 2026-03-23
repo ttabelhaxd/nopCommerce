@@ -4,6 +4,10 @@ using Nop.Core.Domain.Payments;
 using Nop.Services.Catalog;
 using Nop.Services.Customers;
 
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
+
+
 namespace Nop.Services.Payments;
 
 /// <summary>
@@ -18,6 +22,7 @@ public partial class PaymentService : IPaymentService
     protected readonly IPriceCalculationService _priceCalculationService;
     protected readonly PaymentSettings _paymentSettings;
     protected readonly ShoppingCartSettings _shoppingCartSettings;
+    private readonly ILogger<ProductService> _logger;
 
     #endregion
 
@@ -27,13 +32,15 @@ public partial class PaymentService : IPaymentService
         IPaymentPluginManager paymentPluginManager,
         IPriceCalculationService priceCalculationService,
         PaymentSettings paymentSettings,
-        ShoppingCartSettings shoppingCartSettings)
+        ShoppingCartSettings shoppingCartSettings,
+        ILogger<ProductService> logger)
     {
         _customerService = customerService;
         _paymentPluginManager = paymentPluginManager;
         _priceCalculationService = priceCalculationService;
         _paymentSettings = paymentSettings;
         _shoppingCartSettings = shoppingCartSettings;
+        _logger = logger;
     }
 
     #endregion
@@ -48,31 +55,66 @@ public partial class PaymentService : IPaymentService
     /// A task that represents the asynchronous operation
     /// The task result contains the process payment result
     /// </returns>
+
+    // No método ProcessPaymentAsync:
     public virtual async Task<ProcessPaymentResult> ProcessPaymentAsync(ProcessPaymentRequest processPaymentRequest)
     {
-        if (processPaymentRequest.OrderTotal == decimal.Zero)
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("Payment.Process");
+        activity?.SetTag("payment.method", processPaymentRequest.PaymentMethodSystemName);
+        activity?.SetTag("customer.id", processPaymentRequest.CustomerId);
+        activity?.SetTag("order.total", processPaymentRequest.OrderTotal);
+
+        _logger.LogInformation("Processing payment for customer {CustomerId}, method {PaymentMethod}, order total {OrderTotal}",
+            processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName, processPaymentRequest.OrderTotal);
+
+        try
         {
-            var result = new ProcessPaymentResult
+            if (processPaymentRequest.OrderTotal == decimal.Zero)
             {
-                NewPaymentStatus = PaymentStatus.Paid
-            };
-            return result;
-        }
+                var result = new ProcessPaymentResult { NewPaymentStatus = PaymentStatus.Paid };
+                _logger.LogInformation("Order total is zero, payment marked as paid for customer {CustomerId}", processPaymentRequest.CustomerId);
+                return result;
+            }
 
-        //We should strip out any white space or dash in the CC number entered.
-        if (!string.IsNullOrWhiteSpace(processPaymentRequest.CreditCardNumber))
+            if (!string.IsNullOrWhiteSpace(processPaymentRequest.CreditCardNumber))
+            {
+                processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace(" ", string.Empty);
+                processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace("-", string.Empty);
+            }
+
+            var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
+            var paymentMethod = await _paymentPluginManager.LoadPluginBySystemNameAsync(processPaymentRequest.PaymentMethodSystemName, customer, processPaymentRequest.StoreId)
+                                ?? throw new NopException("Payment method couldn't be loaded");
+
+            var paymentResult = await paymentMethod.ProcessPaymentAsync(processPaymentRequest);
+
+            if (!paymentResult.Success)
+            {
+                NopActivitySources.OrdersFailed.Add(1);
+                activity?.SetTag("payment.error", string.Join(",", paymentResult.Errors));
+                _logger.LogWarning("Payment failed for customer {CustomerId}, method {PaymentMethod}. Errors: {Errors}",
+                    processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName, string.Join("; ", paymentResult.Errors));
+            }
+            else
+            {
+                _logger.LogInformation("Payment succeeded for customer {CustomerId}, method {PaymentMethod}, status {PaymentStatus}",
+                    processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName, paymentResult.NewPaymentStatus);
+            }
+
+            return paymentResult;
+        }
+        catch (Exception ex)
         {
-            processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace(" ", string.Empty);
-            processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace("-", string.Empty);
+            NopActivitySources.OrdersFailed.Add(1);
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            activity?.SetTag("exception", ex.ToString());
+            _logger.LogError(ex, "Exception processing payment for customer {CustomerId}, method {PaymentMethod}",
+                processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName);
+            throw;
         }
-
-        var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
-        var paymentMethod = await _paymentPluginManager
-                                .LoadPluginBySystemNameAsync(processPaymentRequest.PaymentMethodSystemName, customer, processPaymentRequest.StoreId)
-                            ?? throw new NopException("Payment method couldn't be loaded");
-
-        return await paymentMethod.ProcessPaymentAsync(processPaymentRequest);
     }
+
 
     /// <summary>
     /// Post process payment (used by payment gateways that require redirecting to a third-party URL)

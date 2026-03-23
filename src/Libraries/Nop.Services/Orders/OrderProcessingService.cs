@@ -32,6 +32,10 @@ using Nop.Services.Stores;
 using Nop.Services.Tax;
 using Nop.Services.Vendors;
 
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
+
+
 namespace Nop.Services.Orders;
 
 /// <summary>
@@ -57,7 +61,7 @@ public partial class OrderProcessingService : IOrderProcessingService
     protected readonly IGiftCardService _giftCardService;
     protected readonly ILanguageService _languageService;
     protected readonly ILocalizationService _localizationService;
-    protected readonly ILogger _logger;
+    protected readonly Nop.Services.Logging.ILogger _logger;
     protected readonly IOrderService _orderService;
     protected readonly IOrderTotalCalculationService _orderTotalCalculationService;
     protected readonly IPaymentPluginManager _paymentPluginManager;
@@ -89,6 +93,7 @@ public partial class OrderProcessingService : IOrderProcessingService
     protected readonly RewardPointsSettings _rewardPointsSettings;
     protected readonly ShippingSettings _shippingSettings;
     protected readonly TaxSettings _taxSettings;
+    private readonly ILogger<OrderProcessingService> _loggerMsft;
 
     #endregion
 
@@ -110,7 +115,7 @@ public partial class OrderProcessingService : IOrderProcessingService
         IGiftCardService giftCardService,
         ILanguageService languageService,
         ILocalizationService localizationService,
-        ILogger logger,
+        Nop.Services.Logging.ILogger logger,
         IOrderService orderService,
         IOrderTotalCalculationService orderTotalCalculationService,
         IPaymentPluginManager paymentPluginManager,
@@ -141,7 +146,8 @@ public partial class OrderProcessingService : IOrderProcessingService
         PaymentSettings paymentSettings,
         RewardPointsSettings rewardPointsSettings,
         ShippingSettings shippingSettings,
-        TaxSettings taxSettings)
+        TaxSettings taxSettings,
+        ILogger<OrderProcessingService> loggerMsft)
     {
         _currencySettings = currencySettings;
         _addressService = addressService;
@@ -191,6 +197,7 @@ public partial class OrderProcessingService : IOrderProcessingService
         _rewardPointsSettings = rewardPointsSettings;
         _shippingSettings = shippingSettings;
         _taxSettings = taxSettings;
+        _loggerMsft = loggerMsft;
     }
 
     #endregion
@@ -480,48 +487,92 @@ public partial class OrderProcessingService : IOrderProcessingService
     /// <param name="currentCurrency">The working currency</param>
     /// <returns>A task that represents the asynchronous operation</returns>
     /// <exception cref="NopException">Validation problems</exception>
-    protected virtual async Task PrepareAndValidateShoppingCartAndCheckoutAttributesAsync(PlaceOrderContainer details, ProcessPaymentRequest processPaymentRequest, Currency currentCurrency)
+    protected virtual async Task PrepareAndValidateShoppingCartAndCheckoutAttributesAsync(
+        PlaceOrderContainer details,
+        ProcessPaymentRequest processPaymentRequest,
+        Currency currentCurrency)
     {
-        //checkout attributes
-        details.CheckoutAttributesXml = await _genericAttributeService.GetAttributeAsync<string>(details.Customer, NopCustomerDefaults.CheckoutAttributes, processPaymentRequest.StoreId);
-        details.CheckoutAttributeDescription = await _checkoutAttributeFormatter.FormatAttributesAsync(details.CheckoutAttributesXml, details.Customer);
-
-        //load shopping cart
-        details.Cart = await _shoppingCartService.GetShoppingCartAsync(details.Customer, ShoppingCartType.ShoppingCart, processPaymentRequest.StoreId);
-
-        if (!details.Cart.Any())
-            throw new NopException("Cart is empty");
-
-        //validate the entire shopping cart
-        var warnings = await _shoppingCartService.GetShoppingCartWarningsAsync(details.Cart, details.CheckoutAttributesXml, true);
-        if (warnings.Any())
-            throw new NopException(warnings.Aggregate(string.Empty, (current, next) => $"{current}{next};"));
-
-        //validate individual cart items
-        foreach (var sci in details.Cart)
+        // SPAN
+        var stopwatch = Stopwatch.StartNew();
+        using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.Basket");
+        try
         {
-            var product = await _productService.GetProductByIdAsync(sci.ProductId);
+            activity?.SetTag("order.flow_stage", "basket_validation");
+            activity?.SetTag("store.id", processPaymentRequest.StoreId);
 
-            var sciWarnings = await _shoppingCartService.GetShoppingCartItemWarningsAsync(details.Customer,
-                sci.ShoppingCartType, product, processPaymentRequest.StoreId, sci.AttributesXml,
-                sci.CustomerEnteredPrice, sci.RentalStartDateUtc, sci.RentalEndDateUtc, sci.Quantity, false, sci.Id);
-            if (sciWarnings.Any())
-                throw new NopException(sciWarnings.Aggregate(string.Empty, (current, next) => $"{current}{next};"));
+            details.CheckoutAttributesXml = await _genericAttributeService.GetAttributeAsync<string>(details.Customer,
+                NopCustomerDefaults.CheckoutAttributes, processPaymentRequest.StoreId);
+            details.CheckoutAttributeDescription = await _checkoutAttributeFormatter
+                .FormatAttributesAsync(details.CheckoutAttributesXml, details.Customer);
+
+            details.Cart = await _shoppingCartService.GetShoppingCartAsync(details.Customer,
+                ShoppingCartType.ShoppingCart, processPaymentRequest.StoreId);
+
+            activity?.SetTag("basket.items_count", details.Cart.Count);
+
+            _loggerMsft.LogInformation("Validating shopping cart with {ItemCount} items for customer {CustomerId}", details.Cart.Count, details.Customer.Id);
+
+            if (!details.Cart.Any())
+                throw new NopException("Cart is empty");
+
+            var warnings = await _shoppingCartService.GetShoppingCartWarningsAsync(
+                details.Cart, details.CheckoutAttributesXml, true);
+            if (warnings.Any())
+            {
+                _loggerMsft.LogWarning("Cart validation warnings: {Warnings}", string.Join("; ", warnings));
+                throw new NopException(warnings.Aggregate(string.Empty, (current, next) => $"{current}{next};"));
+            }
+
+            foreach (var sci in details.Cart)
+            {
+                var product = await _productService.GetProductByIdAsync(sci.ProductId);
+
+                var sciWarnings = await _shoppingCartService.GetShoppingCartItemWarningsAsync(details.Customer,
+                    sci.ShoppingCartType, product, processPaymentRequest.StoreId, sci.AttributesXml,
+                    sci.CustomerEnteredPrice, sci.RentalStartDateUtc, sci.RentalEndDateUtc, sci.Quantity, false, sci.Id);
+                if (sciWarnings.Any())
+                {
+                    _loggerMsft.LogWarning("Shopping cart item warnings for product {ProductId}: {Warnings}", product.Id, string.Join("; ", sciWarnings));
+                    throw new NopException(sciWarnings.Aggregate(string.Empty, (current, next) => $"{current}{next};"));
+                }
+            }
+
+            if (!await ValidateMinOrderSubtotalAmountAsync(details.Cart))
+            {
+                var minOrderSubtotalAmount = await _currencyService
+                    .ConvertFromPrimaryStoreCurrencyAsync(_orderSettings.MinOrderSubtotalAmount, currentCurrency);
+                var errorMsg = string.Format(
+                    await _localizationService.GetResourceAsync("Checkout.MinOrderSubtotalAmount"),
+                    await _priceFormatter.FormatPriceAsync(minOrderSubtotalAmount, true, false));
+                _loggerMsft.LogWarning("Minimum order subtotal validation failed: {Error}", errorMsg);
+                throw new NopException(errorMsg);
+            }
+
+            if (!await ValidateMinOrderTotalAmountAsync(details.Cart))
+            {
+                var minOrderTotalAmount = await _currencyService
+                    .ConvertFromPrimaryStoreCurrencyAsync(_orderSettings.MinOrderTotalAmount, currentCurrency);
+                var errorMsg = string.Format(
+                    await _localizationService.GetResourceAsync("Checkout.MinOrderTotalAmount"),
+                    await _priceFormatter.FormatPriceAsync(minOrderTotalAmount, true, false));
+                _loggerMsft.LogWarning("Minimum order total validation failed: {Error}", errorMsg);
+                throw new NopException(errorMsg);
+            }
         }
-
-        //min totals validation
-        if (!await ValidateMinOrderSubtotalAmountAsync(details.Cart))
+        catch (Exception ex)
         {
-            var minOrderSubtotalAmount = await _currencyService.ConvertFromPrimaryStoreCurrencyAsync(_orderSettings.MinOrderSubtotalAmount, currentCurrency);
-            throw new NopException(string.Format(await _localizationService.GetResourceAsync("Checkout.MinOrderSubtotalAmount"),
-                await _priceFormatter.FormatPriceAsync(minOrderSubtotalAmount, true, false)));
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag("error.type", ex.GetType().Name);
+            activity?.SetTag("error.message", ex.Message);
+            activity?.SetTag("error.flow_stage", "basket_validation");
+            _loggerMsft.LogError(ex, "Error during basket validation for customer {CustomerId}", details.Customer?.Id);
+            throw;
         }
-
-        if (!await ValidateMinOrderTotalAmountAsync(details.Cart))
+        finally
         {
-            var minOrderTotalAmount = await _currencyService.ConvertFromPrimaryStoreCurrencyAsync(_orderSettings.MinOrderTotalAmount, currentCurrency);
-            throw new NopException(string.Format(await _localizationService.GetResourceAsync("Checkout.MinOrderTotalAmount"),
-                await _priceFormatter.FormatPriceAsync(minOrderTotalAmount, true, false)));
+            stopwatch.Stop();
+            NopActivitySources.BasketValidationDuration.Record(stopwatch.ElapsedMilliseconds,
+                new KeyValuePair<string, object?>("items_count", details.Cart?.Count ?? 0));
         }
     }
 
@@ -533,19 +584,40 @@ public partial class OrderProcessingService : IOrderProcessingService
     /// <exception cref="NopException">Validation problems</exception>
     protected virtual async Task PrepareAndValidateBillingAddressAsync(PlaceOrderContainer details)
     {
-        if (details.Customer.BillingAddressId is null)
-            throw new NopException("Billing address is not provided");
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.Billing");
+        try
+        {
+            activity?.SetTag("order.flow_stage", "billing_validation");
+            activity?.SetTag("customer.id", details.Customer?.Id);
 
-        var billingAddress = await _customerService.GetCustomerBillingAddressAsync(details.Customer);
+            if (details.Customer.BillingAddressId is null)
+                throw new NopException("Billing address is not provided");
 
-        if (!CommonHelper.IsValidEmail(billingAddress?.Email))
-            throw new NopException("Email is not valid");
+            var billingAddress = await _customerService.GetCustomerBillingAddressAsync(details.Customer);
 
-        details.BillingAddress = _addressService.CloneAddress(billingAddress);
+            if (!CommonHelper.IsValidEmail(billingAddress?.Email))
+                throw new NopException("Email is not valid");
 
-        if (await _countryService.GetCountryByAddressAsync(details.BillingAddress) is Country billingCountry && !billingCountry.AllowsBilling)
-            throw new NopException($"Country '{billingCountry.Name}' is not allowed for billing");
+            details.BillingAddress = _addressService.CloneAddress(billingAddress);
+
+            if (await _countryService.GetCountryByAddressAsync(details.BillingAddress) is Country billingCountry &&
+                !billingCountry.AllowsBilling)
+                throw new NopException($"Country '{billingCountry.Name}' is not allowed for billing");
+
+            _loggerMsft.LogInformation("Billing address validated for customer {CustomerId}, Address: {Address}", details.Customer.Id, details.BillingAddress?.Address1);
+        }
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag("error.type", ex.GetType().Name);
+            activity?.SetTag("error.message", ex.Message);
+            activity?.SetTag("error.flow_stage", "billing_validation");
+            _loggerMsft.LogError(ex, "Error validating billing address for customer {CustomerId}", details.Customer?.Id);
+            throw;
+        }
     }
+
 
     /// <summary>
     /// Prepare and validate customer
@@ -555,28 +627,54 @@ public partial class OrderProcessingService : IOrderProcessingService
     /// <param name="currentCurrency">The working currency</param>
     /// <returns>A task that represents the asynchronous operation</returns>
     /// <exception cref="NopException">Validation problems</exception>
-    protected virtual async Task PrepareAndValidateCustomerAsync(PlaceOrderContainer details, ProcessPaymentRequest processPaymentRequest, Currency currentCurrency)
+    protected virtual async Task PrepareAndValidateCustomerAsync(
+      PlaceOrderContainer details,
+      ProcessPaymentRequest processPaymentRequest,
+      Currency currentCurrency)
     {
-        details.Customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.Customer");
+        try
+        {
+            activity?.SetTag("order.flow_stage", "customer_validation");
+            activity?.SetTag("customer.id", processPaymentRequest.CustomerId);
 
-        if (details.Customer == null)
-            throw new ArgumentException("Customer is not set");
+            details.Customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
 
-        //check whether customer is guest
-        if (await _customerService.IsGuestAsync(details.Customer) && !_orderSettings.AnonymousCheckoutAllowed)
-            throw new NopException("Anonymous checkout is not allowed");
+            if (details.Customer == null)
+                throw new ArgumentException("Customer is not set");
 
-        //customer currency
-        var currencyTmp = await _currencyService.GetCurrencyByIdAsync(details.Customer.CurrencyId ?? 0);
-        var customerCurrency = currencyTmp != null && currencyTmp.Published && await _storeMappingService.AuthorizeAsync(currencyTmp) ? currencyTmp : currentCurrency;
-        var primaryStoreCurrency = await _currencyService.GetCurrencyByIdAsync(_currencySettings.PrimaryStoreCurrencyId);
-        details.CustomerCurrencyCode = customerCurrency.CurrencyCode;
-        details.CustomerCurrencyRate = customerCurrency.Rate / primaryStoreCurrency.Rate;
+            if (await _customerService.IsGuestAsync(details.Customer) && !_orderSettings.AnonymousCheckoutAllowed)
+                throw new NopException("Anonymous checkout is not allowed");
 
-        //customer language
-        details.CustomerLanguage = await _languageService.GetLanguageByIdAsync(details.Customer.LanguageId ?? 0);
-        if (details.CustomerLanguage == null || !details.CustomerLanguage.Published || !await _storeMappingService.AuthorizeAsync(details.CustomerLanguage))
-            details.CustomerLanguage = await _workContext.GetWorkingLanguageAsync();
+            var currencyTmp = await _currencyService.GetCurrencyByIdAsync(details.Customer.CurrencyId ?? 0);
+            var customerCurrency = currencyTmp != null && currencyTmp.Published &&
+                                await _storeMappingService.AuthorizeAsync(currencyTmp)
+                    ? currencyTmp
+                    : currentCurrency;
+            var primaryStoreCurrency = await _currencyService.GetCurrencyByIdAsync(_currencySettings.PrimaryStoreCurrencyId);
+            details.CustomerCurrencyCode = customerCurrency.CurrencyCode;
+            details.CustomerCurrencyRate = customerCurrency.Rate / primaryStoreCurrency.Rate;
+
+            details.CustomerLanguage = await _languageService.GetLanguageByIdAsync(details.Customer.LanguageId ?? 0);
+            if (details.CustomerLanguage == null || !details.CustomerLanguage.Published ||
+                !await _storeMappingService.AuthorizeAsync(details.CustomerLanguage))
+            {
+                details.CustomerLanguage = await _workContext.GetWorkingLanguageAsync();
+            }
+
+            _loggerMsft.LogInformation("Customer validated: Id={CustomerId}, IsGuest={IsGuest}, Currency={Currency}, Language={Language}",
+                details.Customer.Id, await _customerService.IsGuestAsync(details.Customer), details.CustomerCurrencyCode, details.CustomerLanguage?.Name);
+        }
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag("error.type", ex.GetType().Name);
+            activity?.SetTag("error.message", ex.Message);
+            activity?.SetTag("error.flow_stage", "customer_validation");
+            _loggerMsft.LogError(ex, "Error validating customer {CustomerId}", processPaymentRequest.CustomerId);
+            throw;
+        }
     }
 
     /// <summary>
@@ -1265,68 +1363,104 @@ public partial class OrderProcessingService : IOrderProcessingService
     /// <returns>A task that represents the asynchronous operation</returns>
     protected virtual async Task MoveShoppingCartItemsToOrderItemsAsync(PlaceOrderContainer details, Order order)
     {
-        foreach (var sc in details.Cart)
+        // SPAN
+        using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.Inventory");
+        try
         {
-            var product = await _productService.GetProductByIdAsync(sc.ProductId);
+            activity?.SetTag("order.flow_stage", "inventory");
+            activity?.SetTag("order.id", order.Id);
+            activity?.SetTag("inventory.items_count", details.Cart?.Count ?? 0);
 
-            //prices
-            var scUnitPrice = (await _shoppingCartService.GetUnitPriceAsync(sc, true)).unitPrice;
-            var (scSubTotal, discountAmount, scDiscounts, _) = await _shoppingCartService.GetSubTotalAsync(sc, true);
-            var scUnitPriceInclTax = await _taxService.GetProductPriceAsync(product, scUnitPrice, true, details.Customer);
-            var scUnitPriceExclTax = await _taxService.GetProductPriceAsync(product, scUnitPrice, false, details.Customer);
-            var scSubTotalInclTax = await _taxService.GetProductPriceAsync(product, scSubTotal, true, details.Customer);
-            var scSubTotalExclTax = await _taxService.GetProductPriceAsync(product, scSubTotal, false, details.Customer);
-            var discountAmountInclTax = await _taxService.GetProductPriceAsync(product, discountAmount, true, details.Customer);
-            var discountAmountExclTax = await _taxService.GetProductPriceAsync(product, discountAmount, false, details.Customer);
-            foreach (var disc in scDiscounts)
+            _loggerMsft.LogInformation("Moving {ItemCount} shopping cart items to order items for OrderId {OrderId}", details.Cart?.Count ?? 0, order.Id);
+
+            foreach (var sc in details.Cart)
             {
-                if (!_discountService.ContainsDiscount(details.AppliedDiscounts, disc))
-                    details.AppliedDiscounts.Add(disc);
+                var product = await _productService.GetProductByIdAsync(sc.ProductId);
+                if (product is null)
+                    continue;
+
+                activity?.AddEvent(new ActivityEvent("Inventory.AdjustItem",
+                    tags: new ActivityTagsCollection
+                    {
+                    { "product.id", sc.ProductId },
+                    { "quantity", sc.Quantity }
+                    }));
+
+                var store = await _storeService.GetStoreByIdAsync(sc.StoreId);
+
+                var scUnitPrice = (await _shoppingCartService.GetUnitPriceAsync(sc, true)).unitPrice;
+                var (scSubTotal, discountAmount, scDiscounts, _) =
+                    await _shoppingCartService.GetSubTotalAsync(sc, true);
+                var scUnitPriceInclTax =
+                    await _taxService.GetProductPriceAsync(product, scUnitPrice, true, details.Customer);
+                var scUnitPriceExclTax =
+                    await _taxService.GetProductPriceAsync(product, scUnitPrice, false, details.Customer);
+                var scSubTotalInclTax =
+                    await _taxService.GetProductPriceAsync(product, scSubTotal, true, details.Customer);
+                var scSubTotalExclTax =
+                    await _taxService.GetProductPriceAsync(product, scSubTotal, false, details.Customer);
+                var discountAmountInclTax =
+                    await _taxService.GetProductPriceAsync(product, discountAmount, true, details.Customer);
+                var discountAmountExclTax =
+                    await _taxService.GetProductPriceAsync(product, discountAmount, false, details.Customer);
+
+                foreach (var disc in scDiscounts)
+                {
+                    if (!_discountService.ContainsDiscount(details.AppliedDiscounts, disc))
+                        details.AppliedDiscounts.Add(disc);
+                }
+
+                var attributeDescription =
+                    await _productAttributeFormatter.FormatAttributesAsync(product, sc.AttributesXml, details.Customer, store);
+
+                var itemWeight = await _shippingService.GetShoppingCartItemWeightAsync(sc);
+
+                var orderItem = new OrderItem
+                {
+                    OrderItemGuid = Guid.NewGuid(),
+                    OrderId = order.Id,
+                    ProductId = product.Id,
+                    UnitPriceInclTax = scUnitPriceInclTax.price,
+                    UnitPriceExclTax = scUnitPriceExclTax.price,
+                    PriceInclTax = scSubTotalInclTax.price,
+                    PriceExclTax = scSubTotalExclTax.price,
+                    OriginalProductCost = await _priceCalculationService.GetProductCostAsync(product, sc.AttributesXml),
+                    AttributeDescription = attributeDescription,
+                    AttributesXml = sc.AttributesXml,
+                    Quantity = sc.Quantity,
+                    DiscountAmountInclTax = discountAmountInclTax.price,
+                    DiscountAmountExclTax = discountAmountExclTax.price,
+                    DownloadCount = 0,
+                    IsDownloadActivated = false,
+                    LicenseDownloadId = 0,
+                    ItemWeight = itemWeight,
+                    RentalStartDateUtc = sc.RentalStartDateUtc,
+                    RentalEndDateUtc = sc.RentalEndDateUtc
+                };
+
+                await _orderService.InsertOrderItemAsync(orderItem);
+
+                await AddGiftCardsAsync(product, sc.AttributesXml, sc.Quantity, orderItem, scUnitPriceExclTax.price);
+
+                await _productService.AdjustInventoryAsync(product, -sc.Quantity, sc.AttributesXml,
+                    string.Format(await _localizationService.GetResourceAsync("Admin.StockQuantityHistory.Messages.PlaceOrder"), order.Id));
+
+                await _eventPublisher.PublishAsync(new ShoppingCartItemMovedToOrderItemEvent(sc, orderItem));
             }
 
-            //attributes
-            var store = await _storeService.GetStoreByIdAsync(sc.StoreId);
-            var attributeDescription = await _productAttributeFormatter.FormatAttributesAsync(product, sc.AttributesXml, details.Customer, store);
+            await _shoppingCartService.ClearShoppingCartAsync(details.Customer, order.StoreId);
 
-            var itemWeight = await _shippingService.GetShoppingCartItemWeightAsync(sc);
-
-            //save order item
-            var orderItem = new OrderItem
-            {
-                OrderItemGuid = Guid.NewGuid(),
-                OrderId = order.Id,
-                ProductId = product.Id,
-                UnitPriceInclTax = scUnitPriceInclTax.price,
-                UnitPriceExclTax = scUnitPriceExclTax.price,
-                PriceInclTax = scSubTotalInclTax.price,
-                PriceExclTax = scSubTotalExclTax.price,
-                OriginalProductCost = await _priceCalculationService.GetProductCostAsync(product, sc.AttributesXml),
-                AttributeDescription = attributeDescription,
-                AttributesXml = sc.AttributesXml,
-                Quantity = sc.Quantity,
-                DiscountAmountInclTax = discountAmountInclTax.price,
-                DiscountAmountExclTax = discountAmountExclTax.price,
-                DownloadCount = 0,
-                IsDownloadActivated = false,
-                LicenseDownloadId = 0,
-                ItemWeight = itemWeight,
-                RentalStartDateUtc = sc.RentalStartDateUtc,
-                RentalEndDateUtc = sc.RentalEndDateUtc
-            };
-
-            await _orderService.InsertOrderItemAsync(orderItem);
-
-            //gift cards
-            await AddGiftCardsAsync(product, sc.AttributesXml, sc.Quantity, orderItem, scUnitPriceExclTax.price);
-
-            //inventory
-            await _productService.AdjustInventoryAsync(product, -sc.Quantity, sc.AttributesXml,
-                string.Format(await _localizationService.GetResourceAsync("Admin.StockQuantityHistory.Messages.PlaceOrder"), order.Id));
-
-            await _eventPublisher.PublishAsync(new ShoppingCartItemMovedToOrderItemEvent(sc, orderItem));
+            _loggerMsft.LogInformation("Shopping cart items moved to order items for OrderId {OrderId}", order.Id);
         }
-
-        await _shoppingCartService.ClearShoppingCartAsync(details.Customer, order.StoreId);
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag("error.type", ex.GetType().Name);
+            activity?.SetTag("error.message", ex.Message);
+            activity?.SetTag("error.flow_stage", "inventory");
+            _loggerMsft.LogError(ex, "Error moving shopping cart items to order items for OrderId {OrderId}", order.Id);
+            throw;
+        }
     }
 
     /// <summary>
@@ -1375,41 +1509,96 @@ public partial class OrderProcessingService : IOrderProcessingService
     /// A task that represents the asynchronous operation
     /// The task result contains the 
     /// </returns>
-    protected virtual async Task<ProcessPaymentResult> GetProcessPaymentResultAsync(ProcessPaymentRequest processPaymentRequest, PlaceOrderContainer details)
+    protected virtual async Task<ProcessPaymentResult> GetProcessPaymentResultAsync(
+        ProcessPaymentRequest processPaymentRequest,
+        PlaceOrderContainer details)
     {
-        //process payment
-        ProcessPaymentResult processPaymentResult;
-        //check if is payment workflow required
-        if (await IsPaymentWorkflowRequiredAsync(details.Cart))
+        // SPAN
+        var stopwatch = Stopwatch.StartNew();
+        using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.Payment");
+        try
         {
-            var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
-            var paymentMethod = await _paymentPluginManager
+            activity?.SetTag("order.flow_stage", "payment");
+            activity?.SetTag("customer.id", processPaymentRequest.CustomerId);
+            activity?.SetTag("store.id", processPaymentRequest.StoreId);
+            activity?.SetTag("payment.method", processPaymentRequest.PaymentMethodSystemName);
+
+            _loggerMsft.LogInformation("Processing payment for customer {CustomerId}, method {PaymentMethod}, order total {OrderTotal}",
+                processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName, processPaymentRequest.OrderTotal);
+
+            ProcessPaymentResult processPaymentResult;
+
+            if (await IsPaymentWorkflowRequiredAsync(details.Cart))
+            {
+                var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
+                var paymentMethod = await _paymentPluginManager
                                     .LoadPluginBySystemNameAsync(processPaymentRequest.PaymentMethodSystemName, customer, processPaymentRequest.StoreId)
                                 ?? throw new NopException("Payment method couldn't be loaded");
 
-            //ensure that payment method is active
-            if (!_paymentPluginManager.IsPluginActive(paymentMethod))
-                throw new NopException("Payment method is not active");
+                if (!_paymentPluginManager.IsPluginActive(paymentMethod))
+                    throw new NopException("Payment method is not active");
 
-            if (details.IsRecurringShoppingCart)
-            {
-                //recurring cart
-                processPaymentResult = (await _paymentService.GetRecurringPaymentTypeAsync(processPaymentRequest.PaymentMethodSystemName)) switch
+                if (details.IsRecurringShoppingCart)
                 {
-                    RecurringPaymentType.NotSupported => throw new NopException("Recurring payments are not supported by selected payment method"),
-                    RecurringPaymentType.Manual or
-                        RecurringPaymentType.Automatic => await _paymentService.ProcessRecurringPaymentAsync(processPaymentRequest),
-                    _ => throw new NopException("Not supported recurring payment type"),
-                };
+                    processPaymentResult = (await _paymentService.GetRecurringPaymentTypeAsync(processPaymentRequest.PaymentMethodSystemName)) switch
+                    {
+                        RecurringPaymentType.NotSupported =>
+                            throw new NopException("Recurring payments are not supported by selected payment method"),
+                        RecurringPaymentType.Manual or RecurringPaymentType.Automatic =>
+                            await _paymentService.ProcessRecurringPaymentAsync(processPaymentRequest),
+                        _ => throw new NopException("Not supported recurring payment type")
+                    };
+                }
+                else
+                {
+                    processPaymentResult = await _paymentService.ProcessPaymentAsync(processPaymentRequest);
+                }
             }
             else
-                //standard cart
-                processPaymentResult = await _paymentService.ProcessPaymentAsync(processPaymentRequest);
+            {
+                processPaymentResult = new ProcessPaymentResult { NewPaymentStatus = PaymentStatus.Paid };
+                _loggerMsft.LogInformation("Payment workflow not required (order total zero) for customer {CustomerId}", processPaymentRequest.CustomerId);
+            }
+
+            activity?.SetTag("payment.status", processPaymentResult.NewPaymentStatus.ToString());
+
+            if (!processPaymentResult.Success)
+            {
+                _loggerMsft.LogWarning("Payment failed for customer {CustomerId}, method {PaymentMethod}. Errors: {Errors}",
+                    processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName, string.Join("; ", processPaymentResult.Errors));
+                NopActivitySources.PaymentFailures.Add(1,
+                    new KeyValuePair<string, object?>("payment_method", processPaymentRequest.PaymentMethodSystemName),
+                    new KeyValuePair<string, object?>("status", processPaymentResult.NewPaymentStatus.ToString() ?? "failed"));
+            }
+            else
+            {
+                _loggerMsft.LogInformation("Payment succeeded for customer {CustomerId}, method {PaymentMethod}, status {PaymentStatus}",
+                    processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName, processPaymentResult.NewPaymentStatus);
+            }
+
+            return processPaymentResult;
         }
-        else
-            //payment is not required
-            processPaymentResult = new ProcessPaymentResult { NewPaymentStatus = PaymentStatus.Paid };
-        return processPaymentResult;
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag("error.type", ex.GetType().Name);
+            activity?.SetTag("error.message", ex.Message);
+            activity?.SetTag("error.flow_stage", "payment");
+
+            NopActivitySources.PaymentFailures.Add(1,
+                new KeyValuePair<string, object?>("payment_method", processPaymentRequest.PaymentMethodSystemName),
+                new KeyValuePair<string, object?>("error_type", ex.GetType().Name));
+
+            _loggerMsft.LogError(ex, "Error processing payment for customer {CustomerId}, method {PaymentMethod}",
+                processPaymentRequest.CustomerId, processPaymentRequest.PaymentMethodSystemName);
+            throw;
+        }
+        finally
+        {
+            stopwatch.Stop();
+            NopActivitySources.PaymentProcessingDuration.Record(stopwatch.ElapsedMilliseconds,
+                new KeyValuePair<string, object?>("payment_method", processPaymentRequest.PaymentMethodSystemName));
+        }
     }
 
     /// <summary>
@@ -1487,7 +1676,7 @@ public partial class OrderProcessingService : IOrderProcessingService
                 //shipping is not required
                 completed = true;
             else
-                //shipping is required
+            //shipping is required
             {
                 completed = _orderSettings.CompleteOrderWhenDelivered
                     ? order.ShippingStatus == ShippingStatus.Delivered
@@ -1556,130 +1745,180 @@ public partial class OrderProcessingService : IOrderProcessingService
     /// </returns>
     public virtual async Task<PlaceOrderResult> PlaceOrderAsync(ProcessPaymentRequest processPaymentRequest)
     {
+        // SPAN
+        var stopwatch = Stopwatch.StartNew();
+        using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.PlaceOrder");
+        NopActivitySources.OrdersStarted.Add(1);
+        activity?.SetTag("order.flow_stage", "order_placement");
+        activity?.SetTag("customer.id", processPaymentRequest.CustomerId);
+        activity?.SetTag("store.id", processPaymentRequest.StoreId);
+
         ArgumentNullException.ThrowIfNull(processPaymentRequest);
 
         if (processPaymentRequest.OrderGuid == Guid.Empty)
             throw new Exception("Order GUID is not generated");
 
-        //prepare order details
-        var details = await PreparePlaceOrderDetailsAsync(processPaymentRequest);
-
-        async Task<PlaceOrderResult> placeOrder(PlaceOrderContainer placeOrderContainer)
-        {
-            var result = new PlaceOrderResult();
-
-            try
-            {
-                var processPaymentResult =
-                    await GetProcessPaymentResultAsync(processPaymentRequest, placeOrderContainer)
-                    ?? throw new NopException("processPaymentResult is not available");
-
-                if (processPaymentResult.Success)
-                {
-                    var order = await SaveOrderDetailsAsync(processPaymentRequest, processPaymentResult,
-                        placeOrderContainer);
-                    result.PlacedOrder = order;
-
-                    //move shopping cart items to order items
-                    await MoveShoppingCartItemsToOrderItemsAsync(placeOrderContainer, order);
-
-                    //discount usage history
-                    await SaveDiscountUsageHistoryAsync(placeOrderContainer, order);
-
-                    //gift card usage history
-                    await SaveGiftCardUsageHistoryAsync(placeOrderContainer, order);
-
-                    //recurring orders
-                    if (placeOrderContainer.IsRecurringShoppingCart)
-                        await CreateFirstRecurringPaymentAsync(processPaymentRequest, order);
-
-                    //notifications
-                    await SendNotificationsAndSaveNotesAsync(order);
-
-                    //reset checkout data
-                    await _customerService.ResetCheckoutDataAsync(placeOrderContainer.Customer,
-                        processPaymentRequest.StoreId, clearCouponCodes: true, clearCheckoutAttributes: true);
-                    await _customerActivityService.InsertActivityAsync("PublicStore.PlaceOrder",
-                        string.Format(await _localizationService.GetResourceAsync("ActivityLog.PublicStore.PlaceOrder"),
-                            order.Id), order);
-
-                    //raise event       
-                    await _eventPublisher.PublishAsync(new OrderPlacedEvent(order));
-
-                    //check order status
-                    await CheckOrderStatusAsync(order);
-
-                    if (order.PaymentStatus == PaymentStatus.Paid)
-                        await ProcessOrderPaidAsync(order);
-                }
-                else
-                {
-                    foreach (var paymentError in processPaymentResult.Errors)
-                    {
-                        result.AddError(string.Format(
-                            await _localizationService.GetResourceAsync("Checkout.PaymentError"), paymentError));
-                    }
-                }
-            }
-            catch (Exception exc)
-            {
-                await _logger.ErrorAsync(exc.Message, exc);
-                result.AddError(exc.Message);
-            }
-
-            if (result.Success)
-                return result;
-
-            //log errors
-            var logError = result.Errors.Aggregate("Error while placing order. ",
-                (current, next) => $"{current}Error {result.Errors.IndexOf(next) + 1}: {next}. ");
-            var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
-            await _logger.ErrorAsync(logError, customer: customer);
-
-            return result;
-        }
-
-        if (!_orderSettings.PlaceOrderWithLock)
-            return await placeOrder(details);
-
-        PlaceOrderResult result;
-        var resource = details.Customer.Id.ToString();
-
-        //the named mutex helps to avoid creating the same order in different threads,
-        //and does not decrease performance significantly, because the code is blocked only for the specific cart.
-        //you should be very careful, mutexes cannot be used in with the await operation
-        //we can't use semaphore here, because it produces PlatformNotSupportedException exception on UNIX based systems
-        using var mutex = new Mutex(false, resource);
-
-        mutex.WaitOne();
+        _loggerMsft.LogInformation("Starting order placement for customer {CustomerId}, store {StoreId}", processPaymentRequest.CustomerId, processPaymentRequest.StoreId);
 
         try
         {
-            var cacheKey = _staticCacheManager.PrepareKey(NopOrderDefaults.OrderWithLockCacheKey, resource);
-            cacheKey.CacheTime = _orderSettings.MinimumOrderPlacementInterval;
+            var details = await PreparePlaceOrderDetailsAsync(processPaymentRequest);
 
-            var exist = _staticCacheManager.GetAsync(cacheKey, () => false).Result;
-
-            if (exist)
+            async Task<PlaceOrderResult> placeOrder(PlaceOrderContainer placeOrderContainer)
             {
-                result = new PlaceOrderResult();
-                result.Errors.Add(_localizationService.GetResourceAsync("Checkout.MinOrderPlacementInterval").Result);
+                using var innerActivity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.PlaceOrder.Core");
+                innerActivity?.SetTag("order.flow_stage", "order_core");
+
+                var result = new PlaceOrderResult();
+
+                try
+                {
+                    var processPaymentResult = await GetProcessPaymentResultAsync(processPaymentRequest, placeOrderContainer)
+                                            ?? throw new NopException("processPaymentResult is not available");
+
+                    if (processPaymentResult.Success)
+                    {
+                        var order = await SaveOrderDetailsAsync(processPaymentRequest, processPaymentResult, placeOrderContainer);
+                        result.PlacedOrder = order;
+
+                        NopActivitySources.OrdersPlaced.Add(1,
+                            new KeyValuePair<string, object?>("payment_status", processPaymentResult.NewPaymentStatus.ToString()));
+
+                        await MoveShoppingCartItemsToOrderItemsAsync(placeOrderContainer, order);
+                        await SaveDiscountUsageHistoryAsync(placeOrderContainer, order);
+                        await SaveGiftCardUsageHistoryAsync(placeOrderContainer, order);
+
+                        if (placeOrderContainer.IsRecurringShoppingCart)
+                            await CreateFirstRecurringPaymentAsync(processPaymentRequest, order);
+
+                        await SendNotificationsAndSaveNotesAsync(order);
+                        await _customerService.ResetCheckoutDataAsync(placeOrderContainer.Customer, processPaymentRequest.StoreId, true, true);
+                        await _customerActivityService.InsertActivityAsync("PublicStore.PlaceOrder",
+                            string.Format(await _localizationService.GetResourceAsync("ActivityLog.PublicStore.PlaceOrder"), order.Id), order);
+
+                        await _eventPublisher.PublishAsync(new OrderPlacedEvent(order));
+                        await CheckOrderStatusAsync(order);
+
+                        if (order.PaymentStatus == PaymentStatus.Paid)
+                            await ProcessOrderPaidAsync(order);
+
+                        NopActivitySources.OrderValue.Record((double)order.OrderTotal);
+                        activity?.SetTag("order.total", order.OrderTotal);
+                        activity?.SetTag("order.id", order.Id);
+
+                        _loggerMsft.LogInformation("Order placed successfully. OrderId: {OrderId}, Total: {OrderTotal}", order.Id, order.OrderTotal);
+                    }
+                    else
+                    {
+                        foreach (var paymentError in processPaymentResult.Errors)
+                        {
+                            result.AddError(string.Format(
+                                await _localizationService.GetResourceAsync("Checkout.PaymentError"), paymentError));
+                        }
+                        NopActivitySources.OrderFailures.Add(1,
+                            new KeyValuePair<string, object?>("flow_stage", "payment"),
+                            new KeyValuePair<string, object?>("reason", "payment_failed"));
+
+                        _loggerMsft.LogWarning("Payment failed for order placement. Errors: {Errors}", string.Join("; ", processPaymentResult.Errors));
+                    }
+                }
+                catch (Exception exc)
+                {
+                    innerActivity?.SetStatus(ActivityStatusCode.Error);
+                    innerActivity?.SetTag("error.type", exc.GetType().Name);
+                    innerActivity?.SetTag("error.message", exc.Message);
+                    innerActivity?.SetTag("error.flow_stage", "order_core");
+
+                    NopActivitySources.OrderFailures.Add(1,
+                        new KeyValuePair<string, object?>("flow_stage", "order_core"),
+                        new KeyValuePair<string, object?>("error_type", exc.GetType().Name));
+
+                    _loggerMsft.LogError(exc, "Error during order placement core processing for customer {CustomerId}", processPaymentRequest.CustomerId);
+                    await _logger.ErrorAsync(exc.Message, exc);
+                    result.AddError("Internal error while placing order.");
+                }
+
+                if (result.Success)
+                    return result;
+
+                var logError = result.Errors.Aggregate("Error while placing order. ",
+                    (current, next) => $"{current}Error {result.Errors.IndexOf(next) + 1}: {next}. ");
+                var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
+                await _logger.ErrorAsync(logError, customer: customer);
+
+                return result;
+            }
+
+            PlaceOrderResult finalResult;
+
+            if (!_orderSettings.PlaceOrderWithLock)
+            {
+                finalResult = await placeOrder(details);
             }
             else
             {
-                result = placeOrder(details).Result;
+                PlaceOrderResult result;
+                var resource = details.Customer.Id.ToString();
 
-                if (result.Success)
-                    _staticCacheManager.SetAsync(cacheKey, true).Wait();
+                using var mutex = new Mutex(false, resource);
+                mutex.WaitOne();
+
+                try
+                {
+                    var cacheKey = _staticCacheManager.PrepareKey(NopOrderDefaults.OrderWithLockCacheKey, resource);
+                    cacheKey.CacheTime = _orderSettings.MinimumOrderPlacementInterval;
+
+                    var exist = _staticCacheManager.GetAsync(cacheKey, () => false).Result;
+
+                    if (exist)
+                    {
+                        result = new PlaceOrderResult();
+                        result.Errors.Add(_localizationService.GetResourceAsync("Checkout.MinOrderPlacementInterval").Result);
+                        NopActivitySources.OrderFailures.Add(1,
+                            new KeyValuePair<string, object?>("flow_stage", "lock"),
+                            new KeyValuePair<string, object?>("reason", "min_interval"));
+
+                        _loggerMsft.LogWarning("Order placement blocked due to minimum interval requirement for customer {CustomerId}", processPaymentRequest.CustomerId);
+                    }
+                    else
+                    {
+                        result = placeOrder(details).Result;
+                        if (result.Success)
+                            _staticCacheManager.SetAsync(cacheKey, true).Wait();
+                    }
+                }
+                finally
+                {
+                    mutex.ReleaseMutex();
+                }
+
+                finalResult = result;
             }
+
+            return finalResult;
+        }
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag("error.type", ex.GetType().Name);
+            activity?.SetTag("error.message", ex.Message);
+            activity?.SetTag("error.flow_stage", "order_placement");
+
+            NopActivitySources.OrderFailures.Add(1,
+                new KeyValuePair<string, object?>("flow_stage", "order_placement"),
+                new KeyValuePair<string, object?>("error_type", ex.GetType().Name));
+
+            _loggerMsft.LogError(ex, "Unexpected error in PlaceOrderAsync for customer {CustomerId}", processPaymentRequest.CustomerId);
+            throw;
         }
         finally
         {
-            mutex.ReleaseMutex();
+            stopwatch.Stop();
+            NopActivitySources.OrderEndToEndDuration.Record(stopwatch.ElapsedMilliseconds,
+                new KeyValuePair<string, object?>("customer_id", processPaymentRequest.CustomerId));
         }
-
-        return result;
     }
+
 
     /// <summary>
     /// Update order totals
@@ -2108,7 +2347,7 @@ public partial class OrderProcessingService : IOrderProcessingService
 
         //log it
         var logError = $"Error cancelling recurring payment. Order #{initialOrder.Id}. Error: {error}";
-        await _logger.InsertLogAsync(LogLevel.Error, logError, logError);
+        await _logger.InsertLogAsync(Nop.Core.Domain.Logging.LogLevel.Error, logError, logError);
         return result.Errors;
     }
 
@@ -2513,7 +2752,7 @@ public partial class OrderProcessingService : IOrderProcessingService
 
         //log it
         var logError = $"Error capturing order #{order.Id}. Error: {error}";
-        await _logger.InsertLogAsync(LogLevel.Error, logError, logError);
+        await _logger.InsertLogAsync(Nop.Core.Domain.Logging.LogLevel.Error, logError, logError);
         return result.Errors;
     }
 
@@ -2667,7 +2906,7 @@ public partial class OrderProcessingService : IOrderProcessingService
 
         //log it
         var logError = $"Error refunding order #{order.Id}. Error: {error}";
-        await _logger.InsertLogAsync(LogLevel.Error, logError, logError);
+        await _logger.InsertLogAsync(Nop.Core.Domain.Logging.LogLevel.Error, logError, logError);
 
         return result.Errors;
     }
@@ -2854,7 +3093,7 @@ public partial class OrderProcessingService : IOrderProcessingService
 
         //log it
         var logError = $"Error refunding order #{order.Id}. Error: {error}";
-        await _logger.InsertLogAsync(LogLevel.Error, logError, logError);
+        await _logger.InsertLogAsync(Nop.Core.Domain.Logging.LogLevel.Error, logError, logError);
         return result.Errors;
     }
 
@@ -3017,7 +3256,7 @@ public partial class OrderProcessingService : IOrderProcessingService
 
         //log it
         var logError = $"Error voiding order #{order.Id}. Error: {error}";
-        await _logger.InsertLogAsync(LogLevel.Error, logError, logError);
+        await _logger.InsertLogAsync(Nop.Core.Domain.Logging.LogLevel.Error, logError, logError);
         return result.Errors;
     }
 

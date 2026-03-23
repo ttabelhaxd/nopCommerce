@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   nopcommerce_web:
     build: .
@@ -7,20 +5,13 @@ services:
     restart: unless-stopped
     depends_on:
       - nopcommerce_database
-      - jaeger
-      - prometheus
       - telemetry_service
-    environment:
-      - OTEL_SERVICE_NAME=nopcommerce-service
-      - OTEL_SERVICE_VERSION=5.0.0
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://telemetry_service:4317
-      - OTEL_TRACES_SAMPLER_ARG=1.0  
-
     ports:
       - "80:80"
-      - "9464:9464"   # Prometheus metrics expostas pela app
     volumes:
-      - nopcommerce_data:/app_data
+      - nopcommerce_data:/app/App_Data
+    networks:
+      - nopcommerce_observability
 
   nopcommerce_database:
     image: "mcr.microsoft.com/mssql/server:2019-latest"
@@ -29,6 +20,11 @@ services:
       SA_PASSWORD: "nopCommerce_db_password"
       ACCEPT_EULA: "Y"
       MSSQL_PID: "Express"
+    volumes:
+      - nopcommerce_db_data:/var/opt/mssql
+    networks:
+      - nopcommerce_observability
+
 
   telemetry_service:
     image: otel/opentelemetry-collector-contrib:latest
@@ -37,19 +33,23 @@ services:
     volumes:
       - ./otel-config.yml:/etc/otel-config.yml
     ports:
-      - "4317:4317"   # OTLP 
-      - "9465:9464"   
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "9464:9464"   # Prometheus metrics
     depends_on:
       - jaeger
+      - loki
+    networks:
+      - nopcommerce_observability
 
   jaeger:
     image: jaegertracing/all-in-one:latest
     container_name: jaeger
     ports:
       - "16686:16686"  # Jaeger UI
-      - "9411:9411"
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
+      - "14250:14250"  # Jaeger gRPC
+    networks:
+      - nopcommerce_observability
 
   prometheus:
     image: prom/prometheus:latest
@@ -58,21 +58,44 @@ services:
       - "9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
+    depends_on:
+      - telemetry_service
+    networks:
+      - nopcommerce_observability
 
   grafana:
     image: grafana/grafana:latest
     container_name: grafana
     ports:
       - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/datasources:/etc/grafana/provisioning/datasources
       - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+    depends_on:
+      - prometheus
+      - jaeger
+      - loki
+    networks:
+      - nopcommerce_observability
+
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki_data:/loki
+    networks:
+      - nopcommerce_observability
 
 volumes:
   nopcommerce_data:
+  nopcommerce_db_data:
   grafana_data:
+  loki_data:
+
+networks:
+  nopcommerce_observability:
+    driver: bridge

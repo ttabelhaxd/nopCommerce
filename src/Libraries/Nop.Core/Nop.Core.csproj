@@ -23,13 +23,6 @@
     <PackageReference Include="Nito.AsyncEx.Coordination" Version="5.1.2" />
     <PackageReference Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
     <PackageReference Include="System.Linq.Async" Version="6.0.3" />
-
-    <!-- otel -->
-    <PackageReference Include="OpenTelemetry" Version="1.7.0" />
-    <PackageReference Include="OpenTelemetry.Exporter.Console" Version="1.7.0" />
-    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.7.0" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.7.0" />
-    <PackageReference Include="OpenTelemetry.Instrumentation.SqlClient" Version="1.7.0-rc.1" />
   </ItemGroup>
 
 </Project>
