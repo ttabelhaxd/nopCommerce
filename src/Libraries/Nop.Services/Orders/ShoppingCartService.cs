@@ -25,6 +25,7 @@ using Nop.Services.Shipping.Date;
 using Nop.Services.Stores;
 
 using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 
 namespace Nop.Services.Orders;
 
@@ -700,8 +701,8 @@ public partial class ShoppingCartService : IShoppingCartService
     public virtual async Task<int> DeleteExpiredShoppingCartItemsAsync(DateTime olderThanUtc)
     {
         var query = from sci in _sciRepository.Table
-            where sci.UpdatedOnUtc < olderThanUtc
-            select sci;
+                    where sci.UpdatedOnUtc < olderThanUtc
+                    select sci;
 
         var cartItems = await query.ToListAsync();
 
@@ -1578,185 +1579,193 @@ public partial class ShoppingCartService : IShoppingCartService
         _logger.LogInformation("Adding product {ProductId} to {CartType} for customer {CustomerId}, quantity {Quantity}", product.Id, shoppingCartType, customer.Id, quantity);
 
         var warnings = new List<string>();
-        if (shoppingCartType == ShoppingCartType.ShoppingCart && !await _permissionService.AuthorizeAsync(StandardPermission.PublicStore.ENABLE_SHOPPING_CART, customer))
+
+        try
         {
-            warnings.Add("Shopping cart is disabled");
-            _logger.LogWarning("Shopping cart is disabled for customer {CustomerId}", customer.Id);
-            return warnings;
-        }
-
-        if (shoppingCartType == ShoppingCartType.Wishlist && !await _permissionService.AuthorizeAsync(StandardPermission.PublicStore.ENABLE_WISHLIST, customer))
-        {
-            warnings.Add("Wishlist is disabled");
-            _logger.LogWarning("Wishlist is disabled for customer {CustomerId}", customer.Id);
-            return warnings;
-        }
-
-        if (customer.IsSearchEngineAccount())
-        {
-            warnings.Add("Search engine can't add to cart");
-            _logger.LogWarning("Search engine attempted to add to cart");
-            return warnings;
-        }
-
-        if (quantity <= 0)
-        {
-            warnings.Add(await _localizationService.GetResourceAsync("ShoppingCart.QuantityShouldPositive"));
-            _logger.LogWarning("Invalid quantity {Quantity} for product {ProductId}", quantity, product.Id);
-            return warnings;
-        }
-
-        //reset checkout info
-        await _customerService.ResetCheckoutDataAsync(customer, storeId);
-
-        var cart = await GetShoppingCartAsync(customer, shoppingCartType, storeId);
-
-        var shoppingCartItem = await FindShoppingCartItemInTheCartAsync(cart,
-            shoppingCartType, product, attributesXml, customerEnteredPrice,
-            rentalStartDate, rentalEndDate);
-
-        if (shoppingCartItem != null)
-        {
-            //update existing shopping cart item
-            var newQuantity = shoppingCartItem.Quantity + quantity;
-
-            await addRequiredProductsToCartAsync(newQuantity, wishlistId);
-
-            if (warnings.Any())
-                return warnings;
-
-            warnings.AddRange(await GetShoppingCartItemWarningsAsync(customer, shoppingCartType, product,
-                storeId, attributesXml,
-                customerEnteredPrice, rentalStartDate, rentalEndDate,
-                newQuantity, addRequiredProducts, shoppingCartItem.Id));
-
-            if (warnings.Any())
+            if (shoppingCartType == ShoppingCartType.ShoppingCart && !await _permissionService.AuthorizeAsync(StandardPermission.PublicStore.ENABLE_SHOPPING_CART, customer))
             {
-                _logger.LogWarning("Warnings while updating cart item for product {ProductId}: {Warnings}", product.Id, string.Join("; ", warnings));
+                warnings.Add("Shopping cart is disabled");
+                _logger.LogWarning("Shopping cart is disabled for customer {CustomerId}", customer.Id);
                 return warnings;
             }
 
-            shoppingCartItem.AttributesXml = attributesXml;
-            shoppingCartItem.Quantity = newQuantity;
-            shoppingCartItem.UpdatedOnUtc = DateTime.UtcNow;
-
-            await _sciRepository.UpdateAsync(shoppingCartItem);
-            _logger.LogInformation("Updated existing cart item for product {ProductId}, new quantity {NewQuantity}", product.Id, newQuantity);
-        }
-        else
-        {
-            //new shopping cart item
-            warnings.AddRange(await GetShoppingCartItemWarningsAsync(customer, shoppingCartType, product,
-                storeId, attributesXml, customerEnteredPrice,
-                rentalStartDate, rentalEndDate,
-                quantity, addRequiredProducts));
-
-            if (warnings.Any())
+            if (shoppingCartType == ShoppingCartType.Wishlist && !await _permissionService.AuthorizeAsync(StandardPermission.PublicStore.ENABLE_WISHLIST, customer))
             {
-                _logger.LogWarning("Warnings while adding new cart item for product {ProductId}: {Warnings}", product.Id, string.Join("; ", warnings));
+                warnings.Add("Wishlist is disabled");
+                _logger.LogWarning("Wishlist is disabled for customer {CustomerId}", customer.Id);
                 return warnings;
             }
 
-            await addRequiredProductsToCartAsync(wishlistId: wishlistId);
-
-            if (warnings.Any())
+            if (customer.IsSearchEngineAccount())
+            {
+                warnings.Add("Search engine can't add to cart");
+                _logger.LogWarning("Search engine attempted to add to cart");
                 return warnings;
-
-            //maximum items validation
-            switch (shoppingCartType)
-            {
-                case ShoppingCartType.ShoppingCart:
-                    if (cart.Count >= _shoppingCartSettings.MaximumShoppingCartItems)
-                    {
-                        warnings.Add(string.Format(await _localizationService.GetResourceAsync("ShoppingCart.MaximumShoppingCartItems"), _shoppingCartSettings.MaximumShoppingCartItems));
-                        _logger.LogWarning("Maximum shopping cart items reached for customer {CustomerId}", customer.Id);
-                        return warnings;
-                    }
-                    break;
-                case ShoppingCartType.Wishlist:
-                    if (cart.Count >= _shoppingCartSettings.MaximumWishlistItems)
-                    {
-                        warnings.Add(string.Format(await _localizationService.GetResourceAsync("ShoppingCart.MaximumWishlistItems"), _shoppingCartSettings.MaximumWishlistItems));
-                        _logger.LogWarning("Maximum wishlist items reached for customer {CustomerId}", customer.Id);
-                        return warnings;
-                    }
-                    break;
             }
 
-            var now = DateTime.UtcNow;
-            shoppingCartItem = new ShoppingCartItem
+            if (quantity <= 0)
             {
-                ShoppingCartType = shoppingCartType,
-                StoreId = storeId,
-                ProductId = product.Id,
-                CustomWishlistId = shoppingCartType == ShoppingCartType.Wishlist ? wishlistId : null,
-                AttributesXml = attributesXml,
-                CustomerEnteredPrice = customerEnteredPrice,
-                Quantity = quantity,
-                RentalStartDateUtc = rentalStartDate,
-                RentalEndDateUtc = rentalEndDate,
-                CreatedOnUtc = now,
-                UpdatedOnUtc = now,
-                CustomerId = customer.Id
-            };
-
-            await _sciRepository.InsertAsync(shoppingCartItem);
-            _logger.LogInformation("Added new cart item for product {ProductId}, quantity {Quantity}", product.Id, quantity);
-
-            //updated "HasShoppingCartItems" property used for performance optimization
-            var hasShoppingCartItems = !await IsCustomerShoppingCartEmptyAsync(customer);
-            if (hasShoppingCartItems != customer.HasShoppingCartItems)
-            {
-                customer.HasShoppingCartItems = hasShoppingCartItems;
-                await _customerService.UpdateCustomerAsync(customer);
+                warnings.Add(await _localizationService.GetResourceAsync("ShoppingCart.QuantityShouldPositive"));
+                _logger.LogWarning("Invalid quantity {Quantity} for product {ProductId}", quantity, product.Id);
+                return warnings;
             }
-        }
 
-        return warnings;
+            await _customerService.ResetCheckoutDataAsync(customer, storeId);
 
-        async Task addRequiredProductsToCartAsync(int qty = 0, int? wishlistId = null)
-        {
-            if (!product.RequireOtherProducts)
-                return;
+            var cart = await GetShoppingCartAsync(customer, shoppingCartType, storeId);
 
-            //get these required products
-            var requiredProducts = await _productService.GetProductsByIdsAsync(_productService.ParseRequiredProductIds(product));
-            if (!requiredProducts.Any())
-                return;
+            var shoppingCartItem = await FindShoppingCartItemInTheCartAsync(cart,
+                shoppingCartType, product, attributesXml, customerEnteredPrice,
+                rentalStartDate, rentalEndDate);
 
-            var finalRequiredProducts = requiredProducts.GroupBy(p => p.Id)
-                .Select(g => new { Product = g.First(), Count = g.Count() });
-
-            foreach (var requiredProduct in finalRequiredProducts)
+            if (shoppingCartItem != null)
             {
-                var productsRequiringRequiredProduct = await GetProductsRequiringProductAsync(cart, requiredProduct.Product);
+                var newQuantity = shoppingCartItem.Quantity + quantity;
 
-                //get the required quantity of the required product
-                var requiredProductRequiredQuantity = (qty > 0 ? qty : quantity) +
-                                                    cart.Where(ci => productsRequiringRequiredProduct.Any(p => p.Id == ci.ProductId))
-                                                        .Where(item => item.Id != (shoppingCartItem?.Id ?? 0))
-                                                        .Sum(item => item.Quantity);
+                await addRequiredProductsToCartAsync(newQuantity, wishlistId);
 
-                //whether required product is already in the cart in the required quantity
-                var quantityToAdd = requiredProductRequiredQuantity * requiredProduct.Count - (cart.FirstOrDefault(item => item.ProductId == requiredProduct.Product.Id)?.Quantity ?? 0);
-                if (quantityToAdd <= 0)
-                    continue;
+                if (warnings.Any())
+                    return warnings;
 
-                if (addRequiredProducts && product.AutomaticallyAddRequiredProducts)
+                warnings.AddRange(await GetShoppingCartItemWarningsAsync(customer, shoppingCartType, product,
+                    storeId, attributesXml,
+                    customerEnteredPrice, rentalStartDate, rentalEndDate,
+                    newQuantity, addRequiredProducts, shoppingCartItem.Id));
+
+                if (warnings.Any())
                 {
-                    //do not add required products to prevent circular references
-                    var addToCartWarnings = await AddToCartAsync(customer, requiredProduct.Product, shoppingCartType, storeId,
-                        quantity: quantityToAdd, addRequiredProducts: requiredProduct.Product.AutomaticallyAddRequiredProducts, wishlistId: wishlistId);
+                    _logger.LogWarning("Warnings while updating cart item for product {ProductId}: {Warnings}", product.Id, string.Join("; ", warnings));
+                    return warnings;
+                }
 
-                    if (addToCartWarnings.Any())
+                shoppingCartItem.AttributesXml = attributesXml;
+                shoppingCartItem.Quantity = newQuantity;
+                shoppingCartItem.UpdatedOnUtc = DateTime.UtcNow;
+
+                await _sciRepository.UpdateAsync(shoppingCartItem);
+                _logger.LogInformation("Updated existing cart item for product {ProductId}, new quantity {NewQuantity}", product.Id, newQuantity);
+            }
+            else
+            {
+                warnings.AddRange(await GetShoppingCartItemWarningsAsync(customer, shoppingCartType, product,
+                    storeId, attributesXml, customerEnteredPrice,
+                    rentalStartDate, rentalEndDate,
+                    quantity, addRequiredProducts));
+
+                if (warnings.Any())
+                {
+                    _logger.LogWarning("Warnings while adding new cart item for product {ProductId}: {Warnings}", product.Id, string.Join("; ", warnings));
+                    return warnings;
+                }
+
+                await addRequiredProductsToCartAsync(wishlistId: wishlistId);
+
+                if (warnings.Any())
+                    return warnings;
+
+                switch (shoppingCartType)
+                {
+                    case ShoppingCartType.ShoppingCart:
+                        if (cart.Count >= _shoppingCartSettings.MaximumShoppingCartItems)
+                        {
+                            warnings.Add(string.Format(await _localizationService.GetResourceAsync("ShoppingCart.MaximumShoppingCartItems"), _shoppingCartSettings.MaximumShoppingCartItems));
+                            _logger.LogWarning("Maximum shopping cart items reached for customer {CustomerId}", customer.Id);
+                            return warnings;
+                        }
+                        break;
+                    case ShoppingCartType.Wishlist:
+                        if (cart.Count >= _shoppingCartSettings.MaximumWishlistItems)
+                        {
+                            warnings.Add(string.Format(await _localizationService.GetResourceAsync("ShoppingCart.MaximumWishlistItems"), _shoppingCartSettings.MaximumWishlistItems));
+                            _logger.LogWarning("Maximum wishlist items reached for customer {CustomerId}", customer.Id);
+                            return warnings;
+                        }
+                        break;
+                }
+
+                var now = DateTime.UtcNow;
+                shoppingCartItem = new ShoppingCartItem
+                {
+                    ShoppingCartType = shoppingCartType,
+                    StoreId = storeId,
+                    ProductId = product.Id,
+                    CustomWishlistId = shoppingCartType == ShoppingCartType.Wishlist ? wishlistId : null,
+                    AttributesXml = attributesXml,
+                    CustomerEnteredPrice = customerEnteredPrice,
+                    Quantity = quantity,
+                    RentalStartDateUtc = rentalStartDate,
+                    RentalEndDateUtc = rentalEndDate,
+                    CreatedOnUtc = now,
+                    UpdatedOnUtc = now,
+                    CustomerId = customer.Id
+                };
+
+                await _sciRepository.InsertAsync(shoppingCartItem);
+                _logger.LogInformation("Added new cart item for product {ProductId}, quantity {Quantity}", product.Id, quantity);
+
+                var hasShoppingCartItems = !await IsCustomerShoppingCartEmptyAsync(customer);
+                if (hasShoppingCartItems != customer.HasShoppingCartItems)
+                {
+                    customer.HasShoppingCartItems = hasShoppingCartItems;
+                    await _customerService.UpdateCustomerAsync(customer);
+                }
+            }
+
+            return warnings;
+
+
+            async Task addRequiredProductsToCartAsync(int qty = 0, int? wishlistId = null)
+            {
+                if (!product.RequireOtherProducts)
+                    return;
+
+                //get these required products
+                var requiredProducts = await _productService.GetProductsByIdsAsync(_productService.ParseRequiredProductIds(product));
+                if (!requiredProducts.Any())
+                    return;
+
+                var finalRequiredProducts = requiredProducts.GroupBy(p => p.Id)
+                    .Select(g => new { Product = g.First(), Count = g.Count() });
+
+                foreach (var requiredProduct in finalRequiredProducts)
+                {
+                    var productsRequiringRequiredProduct = await GetProductsRequiringProductAsync(cart, requiredProduct.Product);
+
+                    //get the required quantity of the required product
+                    var requiredProductRequiredQuantity = (qty > 0 ? qty : quantity) +
+                                                        cart.Where(ci => productsRequiringRequiredProduct.Any(p => p.Id == ci.ProductId))
+                                                            .Where(item => item.Id != (shoppingCartItem?.Id ?? 0))
+                                                            .Sum(item => item.Quantity);
+
+                    //whether required product is already in the cart in the required quantity
+                    var quantityToAdd = requiredProductRequiredQuantity * requiredProduct.Count - (cart.FirstOrDefault(item => item.ProductId == requiredProduct.Product.Id)?.Quantity ?? 0);
+                    if (quantityToAdd <= 0)
+                        continue;
+
+                    if (addRequiredProducts && product.AutomaticallyAddRequiredProducts)
                     {
-                        warnings.AddRange(addToCartWarnings);
-                        _logger.LogWarning("Failed to add required product {RequiredProductId} for product {ProductId}: {Warnings}",
-                            requiredProduct.Product.Id, product.Id, string.Join("; ", addToCartWarnings));
-                        return;
+                        //do not add required products to prevent circular references
+                        var addToCartWarnings = await AddToCartAsync(customer, requiredProduct.Product, shoppingCartType, storeId,
+                            quantity: quantityToAdd, addRequiredProducts: requiredProduct.Product.AutomaticallyAddRequiredProducts, wishlistId: wishlistId);
+
+                        if (addToCartWarnings.Any())
+                        {
+                            warnings.AddRange(addToCartWarnings);
+                            _logger.LogWarning("Failed to add required product {RequiredProductId} for product {ProductId}: {Warnings}",
+                                requiredProduct.Product.Id, product.Id, string.Join("; ", addToCartWarnings));
+                            return;
+                        }
                     }
                 }
             }
+        }
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag("error.type", ex.GetType().Name);
+            activity?.SetTag("error.message", ex.Message);
+            _logger.LogError(ex, "Unexpected error adding product {ProductId} to cart for customer {CustomerId}", product.Id, customer.Id);
+            throw;
         }
     }
 

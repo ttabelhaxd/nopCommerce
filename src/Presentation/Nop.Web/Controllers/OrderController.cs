@@ -87,11 +87,22 @@ public partial class OrderController : BasePublicController
         using var activity = NopActivitySources.ActivitySource.StartActivity("Order.CustomerOrders", ActivityKind.Server);
         _loggerMsft.LogInformation("CustomerOrders accessed. PageNumber: {PageNumber}, Limit: {Limit}", pageNumber, limit);
 
-        if (!await _customerService.IsRegisteredAsync(await _workContext.GetCurrentCustomerAsync()))
-            return Challenge();
+        try
+        {
+            if (!await _customerService.IsRegisteredAsync(await _workContext.GetCurrentCustomerAsync()))
+                return Challenge();
 
-        var model = await _orderModelFactory.PrepareCustomerOrderListModelAsync(pageNumber, limit);
-        return View(model);
+            var model = await _orderModelFactory.PrepareCustomerOrderListModelAsync(pageNumber, limit);
+            return View(model);
+        }
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag("error.type", ex.GetType().Name);
+            activity?.SetTag("error.message", ex.Message);
+            _loggerMsft.LogError(ex, "Error loading customer orders");
+            throw;
+        }
     }
 
     //My account / Recurring payments
@@ -188,17 +199,28 @@ public partial class OrderController : BasePublicController
         activity?.SetTag("order.id", orderId);
         _loggerMsft.LogInformation("Loading order details for OrderId: {OrderId}", orderId);
 
-        var order = await _orderService.GetOrderByIdAsync(orderId);
-        var customer = await _workContext.GetCurrentCustomerAsync();
-
-        if (order == null || order.Deleted || customer.Id != order.CustomerId)
+        try
         {
-            _loggerMsft.LogWarning("Order details requested for non-existent or unauthorized order. OrderId: {OrderId}, CustomerId: {CustomerId}", orderId, customer.Id);
-            return Challenge();
-        }
+            var order = await _orderService.GetOrderByIdAsync(orderId);
+            var customer = await _workContext.GetCurrentCustomerAsync();
 
-        var model = await _orderModelFactory.PrepareOrderDetailsModelAsync(order);
-        return View(model);
+            if (order == null || order.Deleted || customer.Id != order.CustomerId)
+            {
+                _loggerMsft.LogWarning("Order details requested for non-existent or unauthorized order. OrderId: {OrderId}, CustomerId: {CustomerId}", orderId, customer.Id);
+                return Challenge();
+            }
+
+            var model = await _orderModelFactory.PrepareOrderDetailsModelAsync(order);
+            return View(model);
+        }
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag("error.type", ex.GetType().Name);
+            activity?.SetTag("error.message", ex.Message);
+            _loggerMsft.LogError(ex, "Error loading order details for OrderId {OrderId}", orderId);
+            throw;
+        }
     }
 
     //My account / Order details page / Print
@@ -275,20 +297,31 @@ public partial class OrderController : BasePublicController
         activity?.SetTag("order.id", orderId);
         _loggerMsft.LogInformation("Re-order requested for order {OrderId}", orderId);
 
-        var order = await _orderService.GetOrderByIdAsync(orderId);
-        var customer = await _workContext.GetCurrentCustomerAsync();
-        if (order == null || order.Deleted || customer.Id != order.CustomerId)
-            return Challenge();
-
-        var warnings = await _orderProcessingService.ReOrderAsync(order);
-
-        if (warnings.Any())
+        try
         {
-            _loggerMsft.LogWarning("Re-order warnings for order {OrderId}: {Warnings}", orderId, string.Join("; ", warnings));
-            _notificationService.WarningNotification(await _localizationService.GetResourceAsync("ShoppingCart.ReorderWarning"));
-        }
+            var order = await _orderService.GetOrderByIdAsync(orderId);
+            var customer = await _workContext.GetCurrentCustomerAsync();
+            if (order == null || order.Deleted || customer.Id != order.CustomerId)
+                return Challenge();
 
-        return RedirectToRoute(NopRouteNames.General.CART);
+            var warnings = await _orderProcessingService.ReOrderAsync(order);
+
+            if (warnings.Any())
+            {
+                _loggerMsft.LogWarning("Re-order warnings for order {OrderId}: {Warnings}", orderId, string.Join("; ", warnings));
+                _notificationService.WarningNotification(await _localizationService.GetResourceAsync("ShoppingCart.ReorderWarning"));
+            }
+
+            return RedirectToRoute(NopRouteNames.General.CART);
+        }
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag("error.type", ex.GetType().Name);
+            activity?.SetTag("error.message", ex.Message);
+            _loggerMsft.LogError(ex, "Error re-ordering for OrderId {OrderId}", orderId);
+            throw;
+        }
     }
 
     //My account / Order details page / Complete payment
@@ -301,29 +334,35 @@ public partial class OrderController : BasePublicController
         activity?.SetTag("order.id", orderId);
         _loggerMsft.LogInformation("Repost payment for order {OrderId}", orderId);
 
-        var order = await _orderService.GetOrderByIdAsync(orderId);
-        var customer = await _workContext.GetCurrentCustomerAsync();
-        if (order == null || order.Deleted || customer.Id != order.CustomerId)
-            return Challenge();
+        try
+        {
+            var order = await _orderService.GetOrderByIdAsync(orderId);
+            var customer = await _workContext.GetCurrentCustomerAsync();
+            if (order == null || order.Deleted || customer.Id != order.CustomerId)
+                return Challenge();
 
-        if (!await _paymentService.CanRePostProcessPaymentAsync(order))
+            if (!await _paymentService.CanRePostProcessPaymentAsync(order))
+                return RedirectToRoute(NopRouteNames.Standard.ORDER_DETAILS, new { orderId = orderId });
+
+            var postProcessPaymentRequest = new PostProcessPaymentRequest
+            {
+                Order = order
+            };
+            await _paymentService.PostProcessPaymentAsync(postProcessPaymentRequest);
+
+            if (_webHelper.IsRequestBeingRedirected || _webHelper.IsPostBeingDone)
+                return new EmptyResult();
+
             return RedirectToRoute(NopRouteNames.Standard.ORDER_DETAILS, new { orderId = orderId });
-
-        var postProcessPaymentRequest = new PostProcessPaymentRequest
-        {
-            Order = order
-        };
-        await _paymentService.PostProcessPaymentAsync(postProcessPaymentRequest);
-
-        if (_webHelper.IsRequestBeingRedirected || _webHelper.IsPostBeingDone)
-        {
-            //redirection or POST has been done in PostProcessPayment
-            return new EmptyResult();
         }
-
-        //if no redirection has been done (to a third-party payment page)
-        //theoretically it's not possible
-        return RedirectToRoute(NopRouteNames.Standard.ORDER_DETAILS, new { orderId = orderId });
+        catch (Exception ex)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error);
+            activity?.SetTag("error.type", ex.GetType().Name);
+            activity?.SetTag("error.message", ex.Message);
+            _loggerMsft.LogError(ex, "Error reposting payment for OrderId {OrderId}", orderId);
+            throw;
+        }
     }
 
     //My account / Order details page / Shipment details page

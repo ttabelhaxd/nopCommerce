@@ -576,7 +576,6 @@ public partial class OrderProcessingService : IOrderProcessingService
         }
     }
 
-
     /// <summary>
     /// Prepare and validate billing address
     /// </summary>
@@ -629,9 +628,9 @@ public partial class OrderProcessingService : IOrderProcessingService
     /// <returns>A task that represents the asynchronous operation</returns>
     /// <exception cref="NopException">Validation problems</exception>
     protected virtual async Task PrepareAndValidateCustomerAsync(
-        PlaceOrderContainer details,
-        ProcessPaymentRequest processPaymentRequest,
-        Currency currentCurrency)
+      PlaceOrderContainer details,
+      ProcessPaymentRequest processPaymentRequest,
+      Currency currentCurrency)
     {
         // SPAN
         using var activity = NopActivitySources.ActivitySource.StartActivity("OrderProcessing.Customer");
@@ -1383,8 +1382,8 @@ public partial class OrderProcessingService : IOrderProcessingService
                 activity?.AddEvent(new ActivityEvent("Inventory.AdjustItem",
                     tags: new ActivityTagsCollection
                     {
-                        { "product.id", sc.ProductId },
-                        { "quantity", sc.Quantity }
+                    { "product.id", sc.ProductId },
+                    { "quantity", sc.Quantity }
                     }));
 
                 var store = await _storeService.GetStoreByIdAsync(sc.StoreId);
