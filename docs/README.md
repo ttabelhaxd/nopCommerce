@@ -220,7 +220,7 @@ rate(payment_failures_total[5m])
 
 ## Load Testing
 
-The script at `load_tests/order-flow-test.js` drives the full checkout flow using [k6](https://k6.io).
+The script at `load_tests/order-flow.js` drives the full checkout flow using [k6](https://k6.io).
 
 **With Docker (no local k6 install):**
 
@@ -265,7 +265,7 @@ nopCommerce/
 │   ├── Libraries/
 │   │   └── Nop.Services/
 │   │       ├── NopActivitySources.cs              # Central definition of ActivitySource,
-│   │       │                                      #   Meter, and all custom metrics
+│   │       │                                      # Meter, and all custom metrics
 │   │       ├── Catalog/
 │   │       │   └── ProductService.cs              # Inventory.Adjust span + inventory.level
 │   │       ├── Orders/
@@ -280,11 +280,11 @@ nopCommerce/
 │           └── Controllers/
 │               ├── CheckoutController.cs          # Checkout.ConfirmOrder span + duration metric
 │               ├── OrderController.cs             # Order.Details / CustomerOrders / Cancel /
-│               │                                  #   ReOrder / RePostPayment spans
+│               │                                  # ReOrder / RePostPayment spans
 │               └── ShoppingCartController.cs      # ShoppingCart.AddToCart span
 ├── load_tests/
 │   ├── order-flow.js                              # k6 load test
-│   └── error-test.js                             # k6 test for failure scenarios
+│   └── error-test.js                              # k6 test for failure scenarios
 │
 ├── docs/
 │   ├── dashboards/
