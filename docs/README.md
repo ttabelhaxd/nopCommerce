@@ -283,19 +283,22 @@ nopCommerce/
 │               │                                  #   ReOrder / RePostPayment spans
 │               └── ShoppingCartController.cs      # ShoppingCart.AddToCart span
 ├── load_tests/
-│   ├── order-flow.js                         # k6 load test
-│   └── error-test.js                          # k6 test for failure scenarios
-|
+│   ├── order-flow.js                              # k6 load test
+│   └── error-test.js                             # k6 test for failure scenarios
+│
 ├── docs/
 │   ├── dashboards/
-│   │   ├── screenshots/                             # Static images for documentation
+│   │   ├── screenshots/                           # Static images for documentation
 │   │   ├── metrics_dashboard.json
 │   │   ├── logs_dashboard.json
 │   │   └── traces_dashboard.json
 |   |
+│   ├── diagrams/
+│   │   └── order_flow_diagram.png                 # Visual representation of the instrumented customer places an order flow
+|   |
 │   ├── CRITIQUE.md                                # Architectural critique
-│   ├── Architecture_Analysis.md                    # Deep dive into code structure and instrumentation
-│   └── README.md                                   # Project overview and setup
+│   ├── Architecture_Analysis.md                   # Deep dive into code structure and instrumentation
+│   └── README.md                                  # Project overview and setup
 |
 ├── docker-compose.yml                             # Full stack in one file
 ├── otel-config.yml                                # OTel Collector pipeline
