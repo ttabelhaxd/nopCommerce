@@ -285,13 +285,14 @@ nopCommerce/
 ├── load_tests/
 │   ├── order-flow.js                         # k6 load test
 │   └── error-test.js                          # k6 test for failure scenarios
-│  
-├── dashboard/
-│   ├── metrics_dashboard.json
-│   ├── logs_dashboard.json
-│   └── traces_dashboard.json
 |
 ├── docs/
+│   ├── dashboards/
+│   │   ├── screenshots/                             # Static images for documentation
+│   │   ├── metrics_dashboard.json
+│   │   ├── logs_dashboard.json
+│   │   └── traces_dashboard.json
+|   |
 │   ├── CRITIQUE.md                                # Architectural critique
 │   ├── Architecture_Analysis.md                    # Deep dive into code structure and instrumentation
 │   └── README.md                                   # Project overview and setup

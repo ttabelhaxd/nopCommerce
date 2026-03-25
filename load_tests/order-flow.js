@@ -4,7 +4,7 @@ import { randomIntBetween } from 'https://jslib.k6.io/k6-utils/1.2.0/index.js';
 
 export const options = {
   vus: 5,
-  duration: '30s',
+  duration: '120s',
   thresholds: {
     http_req_failed: ['rate<0.15'],
     http_req_duration: ['p(95)<4000'],
